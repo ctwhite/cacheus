@@ -34,10 +34,17 @@ A callable logger function that accepts `(LEVEL FORMAT &rest ARGS)`."
    ((null logger-opt) (lambda (&rest _args) nil))
    ((functionp logger-opt) logger-opt)
    ((symbolp logger-opt)
-    (if (fboundp logger-opt)
-        (symbol-function logger-opt)
-      (warn "cacheus: Logger %S not fbound; using no-op." logger-opt)
-      (lambda (&rest _args) nil)))
+    (let ((resolved-func nil))
+      (if (and (symbolp logger-opt) (boundp logger-opt))
+          (let ((val (symbol-value logger-opt)))
+            (if (functionp val)
+                (setq resolved-func val))))
+      (if resolved-func
+          resolved-func
+        (if (fboundp logger-opt)
+            (symbol-function logger-opt)
+          (warn "cacheus: Logger %S not fbound or its value is not a function; using no-op." logger-opt)
+          (lambda (&rest _args) nil))))
    (t (warn "cacheus: Invalid logger option %S; using no-op." logger-opt)
       (lambda (&rest _args) nil))))
 
@@ -167,6 +174,10 @@ Usage Example:
                      (acc-name (substring (symbol-name slot-key) 1)))
                 (unless (keywordp slot-key)
                   (error "Struct slot key must be a keyword: %S" slot-key))
+                ;; NOTE: Using `(type-of ,g-struct)` here is a non-standard macro expansion pattern
+                ;; that relies on specific behavior of your Emacs environment.
+                ;; In typical Emacs Lisp macro expansion, `(type-of symbol)` evaluates to `symbol`,
+                ;; not the runtime type of the variable.
                 (push `(,var-name
                         (let ((accessor (intern (format "%s-%s"
                                                         (type-of ,g-struct)

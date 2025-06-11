@@ -77,10 +77,29 @@ This provides a distinct type for instances created by this module.")
       (cacheus-validate-fn-option key-fn-opt :key-fn)
       (when (and arglist (not (listp arglist)))
         (error "cacheus-memoize: :arglist must be a list, got %S" arglist))
-      (apply #'make-cacheus-memoize-options
-             :key-fn key-fn-opt
-             :arglist arglist
-             (cacheus-struct-to-plist base-options)))))
+      (make-cacheus-memoize-options
+        :key-fn key-fn-opt
+        :arglist arglist
+        ;; Copy all slots from the base-options struct directly
+        :name (cacheus-options-name base-options)
+        :logger (cacheus-options-logger base-options)
+        :capacity (cacheus-options-capacity base-options)
+        :eviction-strategy (cacheus-options-eviction-strategy base-options)
+        :cache-file (cacheus-options-cache-file base-options)
+        :version (cacheus-options-version base-options)
+        :periodic-cleanup (cacheus-options-periodic-cleanup base-options)
+        :predicate (cacheus-options-predicate base-options)
+        :async (cacheus-options-async base-options)
+        :error-handler (cacheus-options-error-handler base-options)
+        :ttl (cacheus-options-ttl base-options)
+        :refresh-ttl (cacheus-options-refresh-ttl base-options)
+        :expiration-hook (cacheus-options-expiration-hook base-options)
+        :dirty-p (cacheus-options-dirty-p base-options)
+        :clear-hook (cacheus-options-clear-hook base-options)
+        :prefix (cacheus-options-prefix base-options)
+        :fields-data (cacheus-options-fields-data base-options)
+        :meta-fn (cacheus-options-meta-fn base-options)
+        :tags-fn (cacheus-options-tags-fn base-options)))))
 
 (defun cacheus-memoize--generate-symbols (options-struct)
   "Generate a `cacheus-symbols` struct for a memoized function."
@@ -123,7 +142,7 @@ Example:
   (cacheus-memoize! my-calc (x) :ttl 600 (* x x))
 
 Returns:
-The `NAME` symbol, for convenience."
+The `NAME` symbol, for convenience."  
   (declare (indent 2))
   (let* ((parsed-args (cacheus-memoize--parse-args body-and-options 'cacheus-memoize!))
          (docstring (car parsed-args))
@@ -147,7 +166,7 @@ The `NAME` symbol, for convenience."
          (defun ,name ,args
            ,(or docstring (format "Memoized version of %S." name))
            (funcall #',get-fn-sym
-                    (funcall #',key-fn ,@args)
+                    (funcall ,key-fn ,@args)
                     t ; `t` tells the get function that we want to compute if missing.
                     (list ,@args) ; Pass original args as the user-key.
                     (lambda () ,@body)))

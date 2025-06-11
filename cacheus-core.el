@@ -589,6 +589,75 @@ The value of the specified custom field."
       (error "Field '%S' not found for cache '%S'." field-name cache-name))
     (funcall accessor-name cache-entry)))
 
+;;;###autoload
+(defun cacheus-get-underlying-cache-ht (cache-name)
+  "Returns the underlying hash table (data store) for a given cache.
+This provides direct access to the `ht-create` object that holds the
+cache entries. Use with caution, as direct modification can break
+cache integrity (e.g., eviction, TTL management).
+
+Arguments:
+- `CACHE-NAME`: The symbol name of the cache.
+
+Returns:
+(hash-table) The underlying hash table storing cache entries."
+  (let* ((symbols (cacheus--get-cache-symbols cache-name))
+         (cache-ht-var (cacheus-symbols-cache-var symbols)))
+    (unless (and cache-ht-var (boundp cache-ht-var))
+      (error "Underlying cache hash table variable not found for cache '%S'."
+             cache-name))
+    (symbol-value cache-ht-var)))
+
+;;;###autoload
+(defun cacheus-map (cache-name fn)
+  "Applies `FN` to each key-value pair in `CACHE-NAME`.
+`FN` should take two arguments: `(key value)`.
+This provides read-only iteration over cache entries.
+
+Arguments:
+- `CACHE-NAME`: The symbol name of the cache.
+- `FN`: A function to apply to each entry.
+
+Returns:
+`nil` (return value of `ht-map`)."
+  (ht-map (cacheus-get-underlying-cache-ht cache-name) fn))
+
+;;;###autoload
+(defun cacheus-keys (cache-name)
+  "Returns a list of all keys in `CACHE-NAME`.
+This provides read-only access to the cache keys.
+
+Arguments:
+- `CACHE-NAME`: The symbol name of the cache.
+
+Returns:
+(list) A list of keys in the cache."
+  (ht-keys (cacheus-get-underlying-cache-ht cache-name)))
+
+;;;###autoload
+(defun cacheus-values (cache-name)
+  "Returns a list of all values (cached data) in `CACHE-NAME`.
+This provides read-only access to the cached data.
+
+Arguments:
+- `CACHE-NAME`: The symbol name of the cache.
+
+Returns:
+(list) A list of values in the cache."
+  (ht-values (cacheus-get-underlying-cache-ht cache-name)))
+
+;;;###autoload
+(defun cacheus-size (cache-name)
+  "Returns the number of entries in `CACHE-NAME`.
+This provides read-only access to the current cache size.
+
+Arguments:
+- `CACHE-NAME`: The symbol name of the cache.
+
+Returns:
+(integer) The number of entries in the cache."
+  (ht-size (cacheus-get-underlying-cache-ht cache-name)))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Shutdown Hook
 

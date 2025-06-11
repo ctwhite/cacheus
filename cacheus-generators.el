@@ -46,7 +46,6 @@ Arguments:
 
 Returns:
 A single `(progn ...)` Lisp form ready for macro expansion."
-  ;; **FIX**: The compute-thunk-form is no longer passed at compile time.
   (let ((instance-constructor (plist-get args :instance-constructor)))
     ;; Destructure the instance blueprint into local variables for easier access.
     ;; This pulls out all options (opts) and generated symbols (syms).
@@ -156,7 +155,6 @@ A `(defun ...)` Lisp form for the 'get' function."
   (-let-pattern*
       (((&struct :options opts) instance)
        ((&struct :name name :async async) opts))
-    ;; **FIX**: The generated function now accepts `compute-thunk` as a runtime argument.
     `(defun ,fn-sym (key &optional compute-if-miss-p user-key compute-thunk)
        ,(format "Get value for KEY from the '%S' cache." name)
        ,(when async `(require 'concur))
