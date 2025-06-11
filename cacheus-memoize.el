@@ -129,32 +129,28 @@ The `NAME` symbol, for convenience."
          (docstring (car parsed-args))
          (opts-plist (cadr parsed-args))
          (body (caddr parsed-args))
-         (instance (cacheus-memoize--create-instance name opts-plist))
+         (final-opts (if (plist-member opts-plist :name)
+                         opts-plist
+                       (plist-put opts-plist :name name)))
+         (instance (cacheus-memoize--create-instance name final-opts))
          (symbols (cacheus-instance-symbols instance))
          (options (cacheus-instance-options instance))
-         (original-fn-sym (intern (format "%s--original-fn"
-                                          (cacheus-symbols-sym-prefix symbols))))
          (get-fn-sym (cacheus-symbols-get-fn symbols))
          (key-fn-opt (cacheus-memoize-options-key-fn options)))
     (unless (listp args) (error "`ARGS` must be a list, got %S" args))
     (let ((key-fn (or key-fn-opt `(lambda ,args (list ,@args)))))
       `(progn
-         ;; a. Define an internal function holding the original body.
-         (defun ,original-fn-sym ,args
-           ,(or docstring (format "Original implementation for %S." name))
-           ,@body)
-         ;; b. Generate the common cache backend (defvars, helpers, etc.).
          ,(cacheus-make-cache-backend
            instance
-           :instance-constructor 'make-cacheus-memoize-instance
-           :compute-thunk-form `(lambda () (funcall ',original-fn-sym ,@args)))
-         ;; c. Generate the final user-facing memoized function.
+           :instance-constructor 'make-cacheus-memoize-instance)
+         ;; Generate the final user-facing memoized function.
          (defun ,name ,args
-           ,(format "Memoized version of %S." name)
+           ,(or docstring (format "Memoized version of %S." name))
            (funcall #',get-fn-sym
                     (funcall #',key-fn ,@args)
                     t ; `t` tells the get function that we want to compute if missing.
-                    (list ,@args))) ; Pass original args as the user-key.
+                    (list ,@args) ; Pass original args as the user-key.
+                    (lambda () ,@body)))
          ',name))))
 
 ;;;###autoload
@@ -212,7 +208,10 @@ Arguments:
 
 Returns:
 A new function (a lambda closure) that acts as the memoized version of `FN`."
-  (let* ((instance (cacheus-memoize--create-instance fn options-plist))
+  (let* ((final-opts (if (plist-member options-plist :name)
+                         options-plist
+                       (plist-put options-plist :name fn)))
+         (instance (cacheus-memoize--create-instance fn final-opts))
          (opts (cacheus-instance-options instance))
          (syms (cacheus-instance-symbols instance))
          (arglist (cacheus-memoize-options-arglist opts))

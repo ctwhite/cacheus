@@ -46,8 +46,8 @@ Arguments:
 
 Returns:
 A single `(progn ...)` Lisp form ready for macro expansion."
-  (let ((instance-constructor (plist-get args :instance-constructor))
-        (compute-thunk-form (plist-get args :compute-thunk-form)))
+  ;; **FIX**: The compute-thunk-form is no longer passed at compile time.
+  (let ((instance-constructor (plist-get args :instance-constructor)))
     ;; Destructure the instance blueprint into local variables for easier access.
     ;; This pulls out all options (opts) and generated symbols (syms).
     (-let-pattern*
@@ -104,8 +104,7 @@ A single `(progn ...)` Lisp form ready for macro expansion."
          ;; 4. Generate the public API functions for this cache instance.
          ;; Each of these `cacheus-make-...` functions returns a `(defun ...)` form.
          ;; Only the functions relevant to the cache's configuration are generated.
-         ,(cacheus-make-get-fn-form get-fn instance instance-constructor
-                                    compute-thunk-form)
+         ,(cacheus-make-get-fn-form get-fn instance instance-constructor)
          ,(cacheus-make-put-fn-form put-fn instance instance-constructor)
          ,(when clear-fn
             (cacheus-make-clear-fn-form clear-fn instance instance-constructor hook))
@@ -142,7 +141,7 @@ A single `(progn ...)` Lisp form ready for macro expansion."
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Main Function Generators
 
-(defun cacheus-make-get-fn-form (fn-sym instance instance-constructor compute-thunk-form)
+(defun cacheus-make-get-fn-form (fn-sym instance instance-constructor)
   "Generate the `defun` form for a generic cache 'get' function.
 This function generates a simple wrapper that delegates all caching logic to
 the central `cacheus-get-or-compute` function.
@@ -151,14 +150,14 @@ Arguments:
 - `FN-SYM`: The symbol to be defined as the 'get' function.
 - `INSTANCE`: The macro-time `cacheus-instance` struct.
 - `INSTANCE-CONSTRUCTOR`: The constructor for the specific instance type.
-- `COMPUTE-THUNK-FORM`: A Lisp form that evaluates to the computation lambda.
 
 Returns:
 A `(defun ...)` Lisp form for the 'get' function."
   (-let-pattern*
       (((&struct :options opts) instance)
        ((&struct :name name :async async) opts))
-    `(defun ,fn-sym (key &optional compute-if-miss-p user-key)
+    ;; **FIX**: The generated function now accepts `compute-thunk` as a runtime argument.
+    `(defun ,fn-sym (key &optional compute-if-miss-p user-key compute-thunk)
        ,(format "Get value for KEY from the '%S' cache." name)
        ,(when async `(require 'concur))
        (cl-block ,fn-sym
@@ -169,10 +168,10 @@ A `(defun ...)` Lisp form for the 'get' function."
                 ',instance ',instance-constructor))
               (cache-ht (cacheus-runtime-data-cache-ht
                          (cacheus-instance-runtime-data runtime-instance))))
-           (if (and compute-if-miss-p ,compute-thunk-form)
+           (if (and compute-if-miss-p compute-thunk)
                ;; On a potential write-path, delegate to the central function.
                (cacheus-get-or-compute runtime-instance key
-                                       ,compute-thunk-form
+                                       compute-thunk
                                        :user-key user-key
                                        :async ,async)
              ;; If not computing, just do a fast, read-only lookup.
