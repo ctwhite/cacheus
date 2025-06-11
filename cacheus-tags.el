@@ -23,7 +23,6 @@
 (declare-function cacheus-evict-one-entry "cacheus-eviction"
                   '(victim-key instance logger))
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Tag Management
 

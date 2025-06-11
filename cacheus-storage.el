@@ -19,7 +19,6 @@
 (require 'cacheus-eviction)
 (require 'cacheus-tags)
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Entry Storage and Asynchronous Operations
 
@@ -120,16 +119,16 @@ A `concur` promise that will resolve to the computed value."
           ;; once the promise is settled (either resolved or rejected). This
           ;; prevents stale entries from blocking future computations.
           (concur:then promise
-                       :on-resolved (lambda (_r)
-                                      (funcall logger :debug
-                                               "[C:%S] async: %S resolved."
-                                               name ekey)
-                                      (ht-remove! inflight-ht ekey))
-                       :on-rejected (lambda (_e)
-                                      (funcall logger :error
-                                               "[C:%S] async: %S rejected."
-                                               name ekey)
-                                      (ht-remove! inflight-ht ekey)))
+                       (lambda (_r)
+                            (funcall logger :debug
+                                      "[C:%S] async: %S resolved."
+                                      name ekey)
+                            (ht-remove! inflight-ht ekey))
+                       (lambda (_e)
+                            (funcall logger :error
+                                      "[C:%S] async: %S rejected."
+                                      name ekey)
+                            (ht-remove! inflight-ht ekey)))
           promise))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -146,16 +145,16 @@ Arguments:
 
 Returns:
 A new cache entry struct instance."
-  (-let* (((&struct :options opts :symbols syms) instance)
-          (logger (cacheus-resolve-logger (cacheus-options-logger opts)))
-          (name (cacheus-options-name opts))
-          (meta-fn (cacheus-options-meta-fn opts))
-          (ctor-fn (symbol-function (cacheus-symbols-make-fn-constructor-for-entries syms)))
-          (ver-var (cacheus-symbols-version-id-var syms))
-          (custom-fields (-remove (lambda (f) (memq (car f) '(data timestamp entry-version)))
-                                  (cacheus-symbols-all-struct-fields-for-entries syms)))
-          (meta-result (if meta-fn (funcall meta-fn key value)))
-          (constructor-args nil))
+  (-let-pattern* (((&struct :options opts :symbols syms) instance)
+                   (logger (cacheus-resolve-logger (cacheus-options-logger opts)))
+                   (name (cacheus-options-name opts))
+                   (meta-fn (cacheus-options-meta-fn opts))
+                   (ctor-fn (symbol-function (cacheus-symbols-make-fn-constructor-for-entries syms)))
+                   (ver-var (cacheus-symbols-version-id-var syms))
+                   (custom-fields (-remove (lambda (f) (memq (car f) '(data timestamp entry-version)))
+                                           (cacheus-symbols-all-struct-fields-for-entries syms)))
+                   (meta-result (if meta-fn (funcall meta-fn key value)))
+                   (constructor-args nil))
     ;; The :meta-fn can return a plist of values for custom fields.
     (when (and meta-result (not (listp meta-result)))
       (funcall logger :warn "[C:%S] :meta-fn returned non-plist: %S. Ignoring." name meta-result)
@@ -187,13 +186,13 @@ Arguments:
 Returns:
 The cached or computed value, or a `concur` promise if `:ASYNC`."
   (cl-block cacheus-get-or-compute
-    (-let* (((&struct :options opts :symbols syms) instance)
-            (name (cacheus-options-name opts))
-            (logger (cacheus-resolve-logger (cacheus-options-logger opts)))
-            (cache-ht (cacheus-runtime-data-cache-ht (cacheus-instance-runtime-data instance)))
-            (inflight-ht (when-let ((var (cacheus-symbols-inflight-var syms)))
-                           (and (boundp var) (symbol-value var))))
-            (entry (ht-get cache-ht key)))
+    (-let-pattern* (((&struct :options opts :symbols syms) instance)
+                     (name (cacheus-options-name opts))
+                     (logger (cacheus-resolve-logger (cacheus-options-logger opts)))
+                     (cache-ht (cacheus-runtime-data-cache-ht (cacheus-instance-runtime-data instance)))
+                     (inflight-ht (when-let ((var (cacheus-symbols-inflight-var syms)))
+                                   (and (boundp var) (symbol-value var))))
+                     (entry (ht-get cache-ht key)))
       ;; --- HIT PATH ---
       (when (and entry (not (cacheus-is-instance-entry-stale key entry instance logger)))
         (funcall logger :debug "[C:%S] Hit key: %S" name key)

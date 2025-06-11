@@ -58,7 +58,6 @@
 ;; `cacheus-macro-memoize!` features.
 (require 'cacheus-memoize)
 
-
 ;;;###autoload
 (defconst cacheus-version "1.0.0"
   "Current version number of the Cacheus framework.")
@@ -69,7 +68,5 @@
   (interactive)
   (message "Cacheus version %s" cacheus-version))
 
-
 (provide 'cacheus)
-
 ;;; cacheus.el ends here

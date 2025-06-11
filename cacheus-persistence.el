@@ -21,7 +21,6 @@
 (require 'cacheus-structs)
 (require 'cacheus-util)
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Global Constants
 
@@ -29,7 +28,6 @@
   "Version string for the Cacheus file format.
 This ensures that breaking changes to the serialization format do not cause
 errors with older cache files.")
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; High-Level Persistence API
@@ -195,7 +193,6 @@ Returns:
          (funcall logger :warn "[C:%S] Cache starts fresh due to load error."
                   name)
          nil)))))
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Low-level Helpers

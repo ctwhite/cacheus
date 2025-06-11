@@ -49,7 +49,6 @@ details, including its `:config` options struct and `:type`.")
 (define-error 'cacheus-error
   "Generic Cacheus error. All specific Cacheus errors inherit from this." nil)
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Core Generation Logic
 
@@ -200,7 +199,6 @@ A fully populated `cacheus-symbols` struct instance."
            (cacheus--generate-symbol-plist
             sym-prefix ttl-opt refresh-ttl-opt capacity-opt
             eviction-strategy-opt file-opt tags-fn-opt))))
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Direct Cache Interaction Macros
@@ -449,7 +447,7 @@ The number of caches successfully operated on."
              (lambda (details)
                (-let-pattern*
                    (((&plist :name cache-name :config opts :symbols syms) details))
-                 (when syms 
+                 (when syms
                   (let* ((op-fn-sym (funcall op-accessor-fn syms))
                           (cache-file (cacheus-options-cache-file opts)))
                     (if (and op-fn-sym (fboundp op-fn-sym)
@@ -516,6 +514,80 @@ Returns:
   (cacheus--operate-on-all-caches "load" #'cacheus-symbols-load-fn
                                   name-filter-regexp))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Entry Data Accessors
+
+(defun cacheus--get-cache-symbols (cache-name)
+  "Helper to retrieve the symbols struct for a given cache-name."
+  (unless (symbolp cache-name)
+    (error "Cache name must be a symbol, got %S" cache-name))
+  (let* ((registry-entry (gethash cache-name cacheus-global-cache-registry))
+         (symbols (and registry-entry (plist-get registry-entry :symbols-struct))))
+    (unless symbols
+      (error "No cache registered with name '%S'." cache-name))
+    symbols))
+
+;;;###autoload
+(defun cacheus-entry-data (cache-name cache-entry)
+  "Retrieve the data from a `CACHE-ENTRY` belonging to `CACHE-NAME`.
+
+Arguments:
+- `CACHE-NAME`: The symbol name of the cache.
+- `CACHE-ENTRY`: The cache entry struct.
+
+Returns:
+The data stored in the cache entry."
+  (let* ((symbols (cacheus--get-cache-symbols cache-name))
+         (data-accessor (cacheus-symbols-data-accessor-for-entries symbols)))
+    (funcall data-accessor cache-entry)))
+
+;;;###autoload
+(defun cacheus-entry-timestamp (cache-name cache-entry)
+  "Retrieve the timestamp from a `CACHE-ENTRY` belonging to `CACHE-NAME`.
+
+Arguments:
+- `CACHE-NAME`: The symbol name of the cache.
+- `CACHE-ENTRY`: The cache entry struct.
+
+Returns:
+The timestamp of the cache entry, or nil if none."
+  (let* ((symbols (cacheus--get-cache-symbols cache-name))
+         (ts-accessor (cacheus-symbols-ts-accessor-for-entries symbols)))
+    (funcall ts-accessor cache-entry)))
+
+;;;###autoload
+(defun cacheus-entry-version (cache-name cache-entry)
+  "Retrieve the version from a `CACHE-ENTRY` belonging to `CACHE-NAME`.
+
+Arguments:
+- `CACHE-NAME`: The symbol name of the cache.
+- `CACHE-ENTRY`: The cache entry struct.
+
+Returns:
+The version of the cache entry, or nil if none."
+  (let* ((symbols (cacheus--get-cache-symbols cache-name))
+         (ver-accessor (cacheus-symbols-entry-ver-accessor-for-entries symbols)))
+    (funcall ver-accessor cache-entry)))
+
+;;;###autoload
+(defun cacheus-entry-field (cache-name cache-entry field-name)
+  "Retrieve a custom `FIELD-NAME` from a `CACHE-ENTRY` of `CACHE-NAME`.
+This function can access any custom fields defined via the `:fields` option
+when the cache was created.
+
+Arguments:
+- `CACHE-NAME`: The symbol name of the cache.
+- `CACHE-ENTRY`: The cache entry struct.
+- `FIELD-NAME`: The symbol name of the custom field (e.g., 'my-custom-field).
+
+Returns:
+The value of the specified custom field."
+  (let* ((symbols (cacheus--get-cache-symbols cache-name))
+         (struct-name (cacheus-symbols-struct-name-for-entries symbols))
+         (accessor-name (intern (format "%s-%s" (symbol-name struct-name) (symbol-name field-name)))))
+    (unless (fboundp accessor-name)
+      (error "Field '%S' not found for cache '%S'." field-name cache-name))
+    (funcall accessor-name cache-entry)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Shutdown Hook

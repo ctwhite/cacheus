@@ -25,7 +25,6 @@
 
 (require 'cacheus-core)
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Module-Specific Definitions
 
@@ -37,7 +36,6 @@
   "A type-specific instance struct for generic caches.
 This struct is functionally identical to the base `cacheus-instance` but
 provides a distinct type for caches created with `cacheus-cache!`.")
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Internal Helpers
@@ -90,7 +88,6 @@ A complete `cacheus-cache-instance` struct."
      :options options
      :symbols symbols
      :runtime-data (make-cacheus-runtime-data))))
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Public Macros and Functions

@@ -17,7 +17,6 @@
 
 (require 'cacheus-structs)
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Logging Utilities
 
@@ -41,7 +40,6 @@ A callable logger function that accepts `(LEVEL FORMAT &rest ARGS)`."
       (lambda (&rest _args) nil)))
    (t (warn "cacheus: Invalid logger option %S; using no-op." logger-opt)
       (lambda (&rest _args) nil))))
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Key Serialization Utilities
@@ -84,7 +82,6 @@ The parsed Elisp key, or `nil` on failure."
      (funcall logger :error "parse-key: Failed for string '%s': %S" skey err)
      nil)))
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Argument and Struct Utilities
 
@@ -105,28 +102,13 @@ Returns:
 
 (defun cacheus-validate-fn-option (value option-name)
   "Validate that VALUE is suitable for an option that expects a function.
-An acceptable value is nil, a symbol, a lambda form, or a function object
-(including forms like `#'(lambda ...)`).
-Signal an error if the validation fails.
-
-Arguments:
-- `VALUE`: The value provided for the option.
-- `OPTION-NAME`: The keyword symbol of the option, for error messages."
+An acceptable value is nil, a symbol (quoted or not), a lambda form,
+or a function object. Signals an error if the validation fails."
   (when (and value
              (not (or (symbolp value)
-                      (functionp value)  ;; For already evaluated function objects (e.g., built-ins, byte-compiled)
-                      ;; Check for a direct lambda form: '(lambda ...)
-                      (and (listp value) (eq (car-safe value) 'lambda))
-                      ;; Check for a function form: #'(lambda ...) which expands to (function (lambda ...))
-                      ;; We must ensure the list is long enough before using cadr
+                      (functionp value)
                       (and (listp value)
-                           (eq (car-safe value) 'function)
-                           ;; Ensure 'value' has at least two elements (car and cdr are not nil)
-                           ;; i.e., (function ...) has at least one element after 'function
-                           (cdr value)
-                           ;; Now it's safe to use cadr
-                           (listp (cadr value))
-                           (eq (car-safe (cadr value)) 'lambda)))))
+                           (memq (car-safe value) '(lambda function quote))))))
     (error "cacheus: %S option must be a function name, a lambda, or a function object, got %S"
            option-name value)))
 
@@ -195,9 +177,16 @@ Usage Example:
     `(-let* ,(nreverse final-forms)
        ,@body)))
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Instance Reconstruction
+
+(defun cacheus-resolve-option-value (value)
+  "Evaluate VALUE if it is a symbol, otherwise return it.
+This is used at runtime to resolve cache options that can be provided
+as either a literal value or a variable."
+  (if (symbolp value)
+      (symbol-value value)
+    value))
 
 (defun cacheus-get-runtime-instance-from-macro-vars
     (blueprint-ref instance-constructor)

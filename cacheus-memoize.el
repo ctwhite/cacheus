@@ -33,7 +33,6 @@
 
 (require 'cacheus-core)
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Module-Specific Definitions
 
@@ -50,7 +49,6 @@ Inherits from `cacheus-options` and adds memoization-specific slots."
 (cl-defstruct (cacheus-memoize-instance (:include cacheus-instance))
   "A type-specific instance struct for memoized functions.
 This provides a distinct type for instances created by this module.")
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Internal Helpers
@@ -99,7 +97,6 @@ This provides a distinct type for instances created by this module.")
     (make-cacheus-memoize-instance
      :options options :symbols symbols
      :runtime-data (make-cacheus-runtime-data))))
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Public Macros and Functions

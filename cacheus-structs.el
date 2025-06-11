@@ -14,13 +14,11 @@
 (require 'cl-lib) ; Required for `cl-defstruct`.
 (require 'ht)     ; Required for `ht-create` in default initializers.
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Global Constants
 
 (defconst cacheus-default-capacity 100
   "The default maximum number of entries a cache can hold if not specified.")
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Shared Struct Definitions

@@ -25,7 +25,6 @@
 (require 'cacheus-storage)
 (require 'cacheus-tags)
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Primary Backend Generator
 
@@ -139,7 +138,6 @@ A single `(progn ...)` Lisp form ready for macro expansion."
                         (error (funcall logger :error
                                         "[C:%S] Initial load failed: %S"
                                         ',name e :trace))))))))))))
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Main Function Generators

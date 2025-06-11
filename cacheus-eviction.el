@@ -22,7 +22,6 @@
 (require 'cacheus-util)
 (require 'cacheus-tags)
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; High-Level API
 
@@ -127,7 +126,6 @@ Returns:
                                          "[C:%S] Expired hook error for %S: %S"
                                          name key e :trace))))))))))))
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Low-level Eviction Logic
 
@@ -209,7 +207,6 @@ The key of a victim to evict, or `nil` if no eviction is needed."
         ;; Cache is full and key is new, so choose a victim.
         (cacheus-eviction-choose-victim strategy order freq-ht cache-ht logger)))))
 
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Low-level Staleness Logic
 
@@ -275,7 +272,6 @@ A list of keys that are considered expired."
                            key (ts-diff (ts-now) ts-obj) ttl)
                   (push key expired)))))
     expired))
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Public Helper Functions
