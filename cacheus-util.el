@@ -46,7 +46,7 @@ A callable logger function that accepts `(LEVEL FORMAT &rest ARGS)`."
           (warn "cacheus: Logger %S not fbound or its value is not a function; using no-op." logger-opt)
           (lambda (&rest _args) nil))))
    (t (warn "cacheus: Invalid logger option %S; using no-op." logger-opt)
-      (lambda (&rest _args) nil))))
+      (lambda (&rest _args) nil)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Key Serialization Utilities
