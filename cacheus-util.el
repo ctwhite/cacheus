@@ -41,13 +41,13 @@ A callable logger function that accepts `(LEVEL FORMAT &rest ARGS)`."
                 (setq resolved-func val))))
       (if resolved-func
           resolved-func
+        ;; If resolved-func is nil, then check if the symbol itself is fbound
         (if (fboundp logger-opt)
             (symbol-function logger-opt)
-          (warn "cacheus: Logger %S not fbound or its value is not a function; using no-op." logger-opt)
-          (lambda (&rest _args) nil))))
-   (t (warn "cacheus: Invalid logger option %S; using no-op." logger-opt)
-      (lambda (&rest _args) nil)))))
-
+          ;; If symbol is not fbound or its value is not a function, fall through to the final t clause
+          nil ; This makes this branch effectively fall through if no function is found
+          ))))
+   (t (warn "cacheus: Invalid logger option %S; using no-op." logger-opt) (lambda (&rest _args) nil))))
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Key Serialization Utilities
 
