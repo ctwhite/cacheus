@@ -41,23 +41,22 @@
   'cacheus-error)
 
 (cl-defstruct (cacheus-memoize-options (:include cacheus-options))
-  "Configuration options for a memoized function.
-Inherits from `cacheus-options` and adds memoization-specific slots."
+  "Configuration options for a memoized function."
   key-fn
   arglist)
 
 (cl-defstruct (cacheus-memoize-instance (:include cacheus-instance))
-  "A type-specific instance struct for memoized functions.
-This provides a distinct type for instances created by this module.")
+  "A type-specific instance struct for memoized functions.")
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Internal Helpers
 
-(defun cacheus-memoize--parse-args (original-args macro-name)
+(defun cacheus-memoize--parse-args (original-args _macro-name)
   "Parse `(docstring? options* body*)` from a macro's arguments."
-  (unless original-args (error "%S: Missing macro body or options" macro-name))
-  (let (docstring options-plist body-forms (args (copy-sequence original-args)))
-    (when (stringp (car args)) (setq docstring (pop args)))
+  (let (docstring options-plist body-forms
+        (args (copy-sequence original-args)))
+    (when (stringp (car args))
+      (setq docstring (pop args)))
     (let ((options-len 0))
       (while (and (< options-len (length args))
                   (keywordp (nth options-len args))
@@ -66,40 +65,40 @@ This provides a distinct type for instances created by this module.")
       (setq options-plist (cl-subseq args 0 options-len))
       (setq body-forms (nthcdr options-len args)))
     (unless (cacheus-plist-valid-p options-plist)
-      (error "%S: Options list is not a valid plist: %S"
-             macro-name options-plist))
+      (error "cacheus: Options list is not a valid plist: %S"
+             options-plist))
     (list docstring options-plist body-forms)))
 
 (defun cacheus-memoize--create-options (name-sym options-plist)
   "Create and validate a `cacheus-memoize-options` struct."
   (let ((base-options (cacheus-create-options name-sym options-plist)))
-    (-let-pattern* (((&plist :key-fn key-fn-opt :arglist arglist) options-plist))
+    (-let-pattern* (((&plist :key-fn key-fn-opt :arglist arglist)
+                     options-plist))
       (cacheus-validate-fn-option key-fn-opt :key-fn)
       (when (and arglist (not (listp arglist)))
         (error "cacheus-memoize: :arglist must be a list, got %S" arglist))
       (make-cacheus-memoize-options
-        :key-fn key-fn-opt
-        :arglist arglist
-        ;; Copy all slots from the base-options struct directly
-        :name (cacheus-options-name base-options)
-        :logger (cacheus-options-logger base-options)
-        :capacity (cacheus-options-capacity base-options)
-        :eviction-strategy (cacheus-options-eviction-strategy base-options)
-        :cache-file (cacheus-options-cache-file base-options)
-        :version (cacheus-options-version base-options)
-        :periodic-cleanup (cacheus-options-periodic-cleanup base-options)
-        :predicate (cacheus-options-predicate base-options)
-        :async (cacheus-options-async base-options)
-        :error-handler (cacheus-options-error-handler base-options)
-        :ttl (cacheus-options-ttl base-options)
-        :refresh-ttl (cacheus-options-refresh-ttl base-options)
-        :expiration-hook (cacheus-options-expiration-hook base-options)
-        :dirty-p (cacheus-options-dirty-p base-options)
-        :clear-hook (cacheus-options-clear-hook base-options)
-        :prefix (cacheus-options-prefix base-options)
-        :fields-data (cacheus-options-fields-data base-options)
-        :meta-fn (cacheus-options-meta-fn base-options)
-        :tags-fn (cacheus-options-tags-fn base-options)))))
+       :key-fn key-fn-opt
+       :arglist arglist
+       :name (cacheus-options-name base-options)
+       :logger (cacheus-options-logger base-options)
+       :capacity (cacheus-options-capacity base-options)
+       :eviction-strategy (cacheus-options-eviction-strategy base-options)
+       :cache-file (cacheus-options-cache-file base-options)
+       :version (cacheus-options-version base-options)
+       :periodic-cleanup (cacheus-options-periodic-cleanup base-options)
+       :predicate (cacheus-options-predicate base-options)
+       :async (cacheus-options-async base-options)
+       :error-handler (cacheus-options-error-handler base-options)
+       :ttl (cacheus-options-ttl base-options)
+       :refresh-ttl (cacheus-options-refresh-ttl base-options)
+       :expiration-hook (cacheus-options-expiration-hook base-options)
+       :dirty-p (cacheus-options-dirty-p base-options)
+       :clear-hook (cacheus-options-clear-hook base-options)
+       :prefix (cacheus-options-prefix base-options)
+       :fields-data (cacheus-options-fields-data base-options)
+       :meta-fn (cacheus-options-meta-fn base-options)
+       :tags-fn (cacheus-options-tags-fn base-options)))))
 
 (defun cacheus-memoize--generate-symbols (options-struct)
   "Generate a `cacheus-symbols` struct for a memoized function."
@@ -114,7 +113,8 @@ This provides a distinct type for instances created by this module.")
   (let* ((options (cacheus-memoize--create-options name-sym options-list))
          (symbols (cacheus-memoize--generate-symbols options)))
     (make-cacheus-memoize-instance
-     :options options :symbols symbols
+     :options options
+     :symbols symbols
      :runtime-data (make-cacheus-runtime-data))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -122,29 +122,10 @@ This provides a distinct type for instances created by this module.")
 
 ;;;###autoload
 (defmacro cacheus-memoize! (name args &rest body-and-options)
-  "Define a memoized Emacs Lisp function `NAME`.
-This macro generates a function with a built-in `cacheus` instance for
-storing results. It supports all options like `:ttl`, `:capacity`, and
-`:persistence`.
-
-Arguments:
-- `NAME` (symbol): Name of the memoized function to define.
-- `ARGS` (list): Argument list for the function.
-- `BODY-AND-OPTIONS`: Optional docstring, keyword options, and function body.
-
-Memoization-specific options:
-- `:key-fn`: A function `(lambda ARGS...)` to transform arguments into a
-  canonical cache key. Defaults to `(list ARGS...)`.
-- `:predicate`: A function `(lambda (value))` to check if a result is
-  valid and should be cached.
-
-Example:
-  (cacheus-memoize! my-calc (x) :ttl 600 (* x x))
-
-Returns:
-The `NAME` symbol, for convenience."  
+  "Define a memoized Emacs Lisp function `NAME`."
   (declare (indent 2))
-  (let* ((parsed-args (cacheus-memoize--parse-args body-and-options 'cacheus-memoize!))
+  (let* ((parsed-args (cacheus-memoize--parse-args
+                       body-and-options 'cacheus-memoize!))
          (docstring (car parsed-args))
          (opts-plist (cadr parsed-args))
          (body (caddr parsed-args))
@@ -162,31 +143,21 @@ The `NAME` symbol, for convenience."
          ,(cacheus-make-cache-backend
            instance
            :instance-constructor 'make-cacheus-memoize-instance)
-         ;; Generate the final user-facing memoized function.
          (defun ,name ,args
            ,(or docstring (format "Memoized version of %S." name))
            (funcall #',get-fn-sym
                     (funcall ,key-fn ,@args)
-                    t ; `t` tells the get function that we want to compute if missing.
-                    (list ,@args) ; Pass original args as the user-key.
+                    t
+                    (list ,@args)
                     (lambda () ,@body)))
          ',name))))
 
 ;;;###autoload
 (defmacro cacheus-macro-memoize! (name args &rest body-and-options)
-  "Define a macro `NAME` that memoizes its own expansion at compile time.
-This is for situations where macro expansion itself is computationally
-expensive. It does not use the full runtime caching engine.
-
-Arguments:
-- `NAME` (symbol): Name of the macro to define.
-- `ARGS` (list): Argument list for the macro.
-- `BODY-AND-OPTIONS`: Optional docstring, keyword options, and body.
-
-Returns:
-A `(progn ...)` form that defines the memoized macro."
+  "Define a macro `NAME` that memoizes its own expansion at compile time."
   (declare (indent 2))
-  (let* ((parsed-args (cacheus-memoize--parse-args body-and-options 'cacheus-macro-memoize!))
+  (let* ((parsed-args (cacheus-memoize--parse-args
+                       body-and-options 'cacheus-macro-memoize!))
          (docstring (car parsed-args))
          (opts-plist (cadr parsed-args))
          (body (caddr parsed-args))
@@ -236,9 +207,8 @@ A new function (a lambda closure) that acts as the memoized version of `FN`."
          (arglist (cacheus-memoize-options-arglist opts))
          (key-fn (or (cacheus-memoize-options-key-fn opts)
                      `(lambda ,arglist (list ,@arglist)))))
-    (unless arglist (error "cacheus-memoize-fn: The :arglist option is required"))
-    ;; The core memoized lambda. It closes over the `instance` and its parts.
-    ;; It now delegates all caching logic to the central `cacheus-get-or-compute`.
+    (unless arglist
+      (error "cacheus-memoize-fn: The :arglist option is required"))
     (let ((memoized-lambda
            (lambda (&rest args)
              (apply (lambda ,arglist
@@ -264,15 +234,19 @@ A new function (a lambda closure) that acts as the memoized version of `FN`."
           (fset save-fn-sym
                 (lambda () (interactive)
                   (cacheus-persist-cache-instance
-                   instance (cacheus-resolve-logger (cacheus-options-logger opts))))))
+                   instance
+                   (cacheus-resolve-logger (cacheus-options-logger opts))))))
         (when inv-fn-sym
           (fset inv-fn-sym
                 (lambda (tags &key all-must-match run-hooks)
                   (cacheus-invalidate-keys-by-tags
-                   instance tags :all-must-match all-must-match :run-hooks run-hooks))))
+                   instance tags
+                   :all-must-match all-must-match :run-hooks run-hooks))))
         (when insp-fn-sym
           (fset insp-fn-sym
-                (lambda () (interactive) (cacheus-inspect-instance-dispatch instance nil))))
+                (lambda ()
+                  (interactive)
+                  (cacheus-inspect-instance-dispatch instance nil))))
         (when insp-entry-fn-sym
           (fset insp-entry-fn-sym
                 (lambda (key) (interactive "sKey:")
@@ -282,7 +256,8 @@ A new function (a lambda closure) that acts as the memoized version of `FN`."
         (put memoized-lambda 'invalidate-by-tags inv-fn-sym)
         (put memoized-lambda 'inspect-cache insp-fn-sym)
         (put memoized-lambda 'inspect-entry insp-entry-fn-sym)
-        (put memoized-lambda 'cache-instance-name (cacheus-options-name opts)))
+        (put memoized-lambda 'cache-instance-name
+             (cacheus-options-name opts)))
       memoized-lambda)))
 
 (provide 'cacheus-memoize)

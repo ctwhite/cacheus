@@ -31,6 +31,128 @@
 (defun cacheus-make-cache-backend (instance &rest args)
   "The central code-generation engine for the entire Cacheus framework.
 This function is the internal workhorse called by high-level macros like
+`cacheus-cache!` and `cacheus-memoize!`. It takes a pre-configured `INSTANCE`
+blueprint and generates a single, large `(progn ...)` form containing all the
+Lisp code required to create and manage a complete cache instance.
+
+Arguments:
+- `instance` (`cacheus-instance` struct): A complete blueprint of the cache.
+- `args` (plist): A property list for additional macro-specific context.
+  - `:instance-constructor` (symbol): The constructor function for the
+    specific instance type (e.g., 'make-cacheus-cache-instance).
+
+Returns:
+  (progn): A single `(progn ...)` Lisp form ready for macro expansion."
+  (let ((instance-constructor (plist-get args :instance-constructor)))
+    (-let-pattern*
+        (((&struct :options opts :symbols syms) instance)
+         ((&struct :name name :logger logger :version ver :cache-file file
+                   :capacity cap :clear-hook hook) opts)
+         ((&struct :all-struct-fields-for-entries all-fields
+                   :struct-name-for-entries s-name
+                   :make-fn-constructor-for-entries ctor
+                   :get-fn get-fn :put-fn put-fn :clear-fn clear-fn
+                   :save-fn save-fn :load-fn load-fn
+                   :cache-var cache-var :version-id-var ver-id-var
+                   :size-var size-var :inspect-cache-fn inspect-cache-fn
+                   :inspect-entry-fn inspect-entry-fn
+                   :invalidate-tags-fn inv-tags-fn
+                   :inflight-var inflight-var) syms))
+      `(progn
+
+         ;; Define the core variables for this cache instance.
+         (defvar ,cache-var (ht-create) ,(format "Cache for %S." name))
+         (defvar ,size-var ,cap ,(format "Capacity for %S." name))
+         (defvar ,ver-id-var ,ver ,(format "Functional version for %S." name))
+         ,(when inflight-var `(defvar ,inflight-var (ht-create)
+                                ,(format "In-flight requests for %S." name)))
+
+         ;; Register the cache in the global registry.
+         (ht-set! cacheus-global-cache-registry ',name
+                  (list :name ',name
+                        :config (cacheus-instance-options ',instance)
+                        :symbols-struct (cacheus-instance-symbols ',instance)
+                        :macro-time-instance ',instance
+                        :get-fn-symbol ',get-fn
+                        :put-fn-symbol ',put-fn
+                        :clear-fn-symbol ',clear-fn
+                        :save-fn-symbol ',save-fn
+                        :load-fn-symbol ',load-fn
+                        :invalidate-by-tags-fn-symbol ',inv-tags-fn
+                        :type (let ((type-sym (type-of ,instance)))
+                                (cond ((eq type-sym 'cacheus-memoize-instance) 'memoize)
+                                      ((eq type-sym 'cacheus-cache-instance) 'cache)
+                                      (t (error "Unknown instance type: %S"
+                                                type-sym))))))
+
+         ;; Generate the public API functions for this cache instance.
+         ,(cacheus-make-get-fn-form get-fn instance instance-constructor)
+         ,(cacheus-make-put-fn-form put-fn instance instance-constructor)
+         ,(when clear-fn
+            (cacheus-make-clear-fn-form clear-fn instance
+                                        instance-constructor hook))
+         ,(when save-fn
+            (cacheus-make-save-fn-form save-fn instance instance-constructor))
+         ,(when load-fn
+            (cacheus-make-load-fn-form load-fn instance instance-constructor))
+         ,(when inspect-cache-fn
+            (cacheus-make-inspect-cache-fn-form inspect-cache-fn instance
+                                                instance-constructor))
+         ,(when inspect-entry-fn
+            (cacheus-make-inspect-entry-fn-form inspect-entry-fn instance
+                                                instance-constructor))
+         ,(when inv-tags-fn
+            (cacheus-make-invalidate-by-tags-fn-form inv-tags-fn instance
+                                                     instance-constructor))
+
+         ;; Set up the initial load from a persistent file, if configured.
+         ,(when (and load-fn file)
+            `(eval-after-load 'cacheus
+               '(lambda ()
+                  (let ((logger (cacheus-resolve-logger ,logger)))
+                    (when (file-exists-p ,file)
+                      (funcall logger :info "[C:%S] Initial load from %s"
+                               ',name ,file)
+                      (condition-case-unless-debug e (,load-fn)
+                        (error (funcall logger :error
+                                        "[C:%S] Initial load failed: %S"
+                                        ',name e :trace))))))))))))
+
+
+
+;;; cacheus-generators.el --- Generic function generators for Cacheus modules -*- lexical-binding: t; -*-
+
+;;; Commentary:
+;;
+;; This file is the code-generation engine for the Cacheus framework. It
+;; provides a collection of helper functions and a helper macro that build the
+;; full `defun` and `defvar` boilerplate for any cache defined with
+;; `cacheus-cache!` or `cacheus-memoize!`.
+;;
+;; Its primary export is `cacheus-make-cache-backend`, the internal workhorse
+;; function that orchestrates all other generators in this file.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'ht)
+(require 'ts)
+(require 'dash)
+(require 'concur nil t)
+
+(require 'cacheus-structs)
+(require 'cacheus-util)
+(require 'cacheus-eviction)
+(require 'cacheus-persistence)
+(require 'cacheus-storage)
+(require 'cacheus-tags)
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Primary Backend Generator
+
+(defun cacheus-make-cache-backend (instance &rest args)
+  "The central code-generation engine for the entire Cacheus framework.
+This function is the internal workhorse called by high-level macros like
 `cacheus-cache!` and `cacheus-memoize!`. It is not intended to be called
 directly by end-users. It takes a pre-configured `INSTANCE` blueprint and
 generates a single, large `(progn ...)` form containing all the Lisp code
@@ -62,14 +184,22 @@ A single `(progn ...)` Lisp form ready for macro expansion."
                    :size-var size-var :inspect-cache-fn inspect-cache-fn
                    :inspect-entry-fn inspect-entry-fn
                    :invalidate-tags-fn inv-tags-fn
-                   :inflight-var inflight-var) syms))
-
+                   :inflight-var inflight-var) syms)
+          (unique-all-fields (cl-remove-duplicates all-fields
+                                              :key #'car :test #'eq)))
+      (message "unique-all-fields: %s" unique-all-fields)                                              
       ;; Return a single `progn` form containing all generated code.
       `(progn
          ;; 1. Define the cache-entry struct.
          ;; This struct holds the cached data (`data`), metadata (`timestamp`,
          ;; `entry-version`), and any user-defined `:fields`.
-         (cl-defstruct (,s-name (:constructor ,ctor)) ,@all-fields)
+         ;; FIX: Bypass the compiler bug by building the struct definition form
+         ;; manually and then evaluating it at runtime. This avoids both the
+         ;; list-splicing bug and the invalid syntax from the previous attempt.
+         (unless (fboundp ',ctor)
+           (eval (append '(cl-defstruct)
+                         (list (list ',s-name (list :constructor ',ctor)))
+                         ',unique-all-fields)))
 
          ;; 2. Define the core variables for this cache instance.
          ;; Each cache gets its own set of namespaced variables.
@@ -423,3 +553,5 @@ A `(cl-defun ...)` Lisp form for the 'invalidate-by-tags' function."
 
 (provide 'cacheus-generators)
 ;;; cacheus-generators.el ends here
+
+

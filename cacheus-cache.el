@@ -92,7 +92,6 @@ A complete `cacheus-cache-instance` struct."
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Public Macros and Functions
 
-;;;###autoload
 (defmacro cacheus-cache! (name &rest options-list)
   "Define a namespaced, general-purpose, and optionally persistent cache.
 This macro generates a complete cache instance with its own data structures
