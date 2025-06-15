@@ -267,7 +267,7 @@
           (cacheus--handle-miss-sync live-instance key compute-thunk final-user-key))))))
 
 ;;;###autoload
-(defun cacheus-put (cache-name key value &key tags)
+(cl-defun cacheus-put (cache-name key value &key tags)
   "Manually insert or update a VALUE for a given KEY in a cache."
   (let ((instance (cacheus--get-instance-by-name cache-name)))
     (cacheus-let* (((&struct :options options) instance)
