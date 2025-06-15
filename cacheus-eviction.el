@@ -1,5 +1,6 @@
-;;; cacheus-eviction.el --- Core eviction and staleness management for Cacheus -*- lexical-binding: t; -*-
+;;; cacheus-eviction.el --- Eviction and staleness management for Cacheus -*- lexical-binding: t; -*-
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Commentary:
 ;;
 ;; This file provides the core logic for managing cache entries based on
@@ -10,6 +11,7 @@
 ;; This logic is used by higher-level modules to implement features like
 ;; time-to-live (TTL) expiration and capacity-based eviction (LRU, LFU, FIFO).
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Code:
 
 (require 'cl-lib)
@@ -28,13 +30,23 @@
 (defun cacheus-is-instance-entry-stale (key entry-struct instance logger)
   "Check if a cache `ENTRY-STRUCT` for `KEY` in `INSTANCE` is stale.
 This is a high-level wrapper around `cacheus--is-entry-stale-p` that
-gathers and resolves the necessary parameters from the live cache `INSTANCE`."
-  (-let-pattern*
+gathers and resolves the necessary parameters from the live cache `INSTANCE`.
+
+Arguments:
+- `KEY` (any): The effective key of the entry being checked.
+- `ENTRY-STRUCT` (struct): The cache entry struct.
+- `INSTANCE` (cacheus-instance): The live instance of the cache.
+- `LOGGER` (function): The resolved logger function.
+
+Returns:
+  (string|nil): A string describing the reason if stale, or `nil` if fresh."
+  (cacheus-let*
       (((&struct :options opts :symbols syms :runtime-data data) instance)
-       ;; Get the raw options, which might be symbols.
+       ;; Get the raw options, which might be symbols that need resolving.
        ((&struct :ttl ttl-opt :version version-opt
                  :dirty-p dirty-p-opt :refresh-ttl refresh-opt) opts)
-       ((&struct :ts-accessor-for-entries ts-acc
+       ((&struct :key-accessor-for-entries key-acc
+                 :ts-accessor-for-entries ts-acc
                  :entry-ver-accessor-for-entries ver-acc) syms)
        ((&struct :timestamps-ht ts-ht) data)
        ;; Resolve the options to their runtime values.
@@ -44,21 +56,22 @@ gathers and resolves the necessary parameters from the live cache `INSTANCE`."
        (entry-ver (funcall ver-acc entry-struct))
        (refresh-ts (when (and ts-ht refresh-opt) (ht-get ts-ht key))))
     ;; Pass the RESOLVED values to the low-level checker.
-    (cacheus--is-entry-stale-p key entry-struct entry-ts resolved-ttl
+    (cacheus--is-entry-stale-p (funcall key-acc entry-struct)
+                               entry-struct entry-ts resolved-ttl
                                entry-ver resolved-version
                                dirty-p-opt refresh-ts logger)))
-                               
+
 (defun cacheus-update-instance-on-hit (key instance)
   "Update cache metadata on hit for `INSTANCE`.
 This orchestrates updates for eviction metadata (LRU/LFU) and sliding TTL.
 
 Arguments:
-- `KEY`: The effective cache key that was hit.
-- `INSTANCE`: The live `cacheus-instance`.
+- `KEY` (any): The effective cache key that was hit.
+- `INSTANCE` (cacheus-instance): The live instance of the cache.
 
 Returns:
-`nil`."
-  (-let-pattern*
+  nil."
+  (cacheus-let*
       (((&struct :options opts :runtime-data data) instance)
        ((&struct :eviction-strategy strategy :refresh-ttl refresh-ttl
                  :ttl ttl :name name :logger logger-opt) opts)
@@ -67,7 +80,7 @@ Returns:
        (logger (cacheus-resolve-logger logger-opt)))
     ;; 1. Update LRU/LFU metadata.
     (cacheus-eviction-update-on-hit strategy key order freq-ht logger)
-    ;; 2. Handle sliding TTL.
+    ;; 2. Handle sliding TTL by updating the external timestamp.
     (when (and refresh-ttl ttl ts-ht)
       (ht-set! ts-ht key (ts-now))
       (funcall logger :debug "[C:%S] Refreshed TTL for key: %S" name key))))
@@ -78,13 +91,13 @@ This ensures an evicted key is removed from the main cache, timestamp and
 frequency tables, the ordering ring, and its associated tag information.
 
 Arguments:
-- `VICTIM-KEY`: The key of the entry to evict.
-- `INSTANCE`: The live `cacheus-instance`.
-- `LOGGER`: The resolved logger function for debug messages.
+- `VICTIM-KEY` (any): The key of the entry to evict.
+- `INSTANCE` (cacheus-instance): The live instance of the cache.
+- `LOGGER` (function): The resolved logger function for debug messages.
 
 Returns:
-`nil`."
-  (-let-pattern*
+  nil."
+  (cacheus-let*
       (((&struct :options opts :runtime-data data) instance)
        ((&struct :name name) opts)
        ((&struct :cache-ht cache-ht :timestamps-ht ts-ht :order-data order
@@ -102,11 +115,11 @@ Returns:
 This function is typically called periodically by a timer or cleanup process.
 
 Arguments:
-- `INSTANCE`: The live `cacheus-instance` to clean.
+- `INSTANCE` (cacheus-instance): The live instance of the cache to clean.
 
 Returns:
-`nil`."
-  (-let-pattern*
+  nil."
+  (cacheus-let*
       (((&struct :options opts :runtime-data data) instance)
        ((&struct :name name :ttl ttl :expiration-hook hook :logger logger-opt) opts)
        ((&struct :cache-ht cache-ht :timestamps-ht ts-ht) data)
@@ -133,14 +146,14 @@ Returns:
   "Update eviction metadata (LRU/LFU) for `KEY` upon a cache hit.
 
 Arguments:
-- `STRATEGY`: Eviction strategy (`:lru`, `:lfu`, `:fifo`, or `nil`).
-- `KEY`: The cache key that was hit.
-- `ORDER-DATA`: The ring buffer for LRU/FIFO.
-- `FREQUENCY-HT`: The hash table for LFU frequencies.
-- `LOGGER`: The resolved logger function.
+- `STRATEGY` (keyword): Eviction strategy (`:lru`, `:lfu`, `:fifo`, or `nil`).
+- `KEY` (any): The cache key that was hit.
+- `ORDER-DATA` (ring): The ring buffer for LRU/FIFO.
+- `FREQUENCY-HT` (hash-table): The hash table for LFU frequencies.
+- `LOGGER` (function): The resolved logger function.
 
 Returns:
-`nil`."
+  nil."
   (pcase strategy
     (:lru
      (when order-data (ring-remove order-data key) (ring-insert order-data key))
@@ -158,20 +171,20 @@ Returns:
   "Choose a victim key for eviction based on the specified `STRATEGY`.
 
 Arguments:
-- `STRATEGY`: Eviction strategy (`:lru`, `:lfu`, `:fifo`).
-- `ORDER-DATA`: The ring buffer for LRU/FIFO.
-- `FREQUENCY-HT`: The hash table for LFU frequencies.
-- `CACHE-HT`: The main cache hash table, used to verify victim existence.
-- `LOGGER`: The resolved logger function.
+- `STRATEGY` (keyword): Eviction strategy (`:lru`, `:lfu`, `:fifo`).
+- `ORDER-DATA` (ring): The ring buffer for LRU/FIFO.
+- `FREQUENCY-HT` (hash-table): The hash table for LFU frequencies.
+- `CACHE-HT` (hash-table): The main cache hash table.
+- `LOGGER` (function): The resolved logger function.
 
 Returns:
-The key of the victim to be evicted, or `nil` if no victim is chosen."
+  (any): The key of the victim to be evicted, or `nil`."
   (pcase strategy
     ((or :lru :fifo) (when order-data (ring-back order-data)))
     (:lfu
      (when frequency-ht
-       ;; NOTE: This is a simple O(n) scan. A more complex implementation could
-       ;; achieve O(1) eviction but is not necessary for most use cases.
+       ;; NOTE: This is a simple O(n) scan. A more complex implementation
+       ;; could achieve O(1) eviction but is not necessary for most use cases.
        (let ((min-freq most-positive-fixnum) (victim-key nil))
          (ht-map frequency-ht
                  (lambda (k f)
@@ -189,12 +202,12 @@ If the cache is at capacity and `KEY` is new, a victim key is returned.
 If `KEY` already exists, its eviction metadata is simply updated.
 
 Arguments:
-- `KEY`: The effective cache key to be inserted.
-- `INSTANCE`: The live `cacheus-instance` to operate on.
+- `KEY` (any): The effective cache key to be inserted.
+- `INSTANCE` (cacheus-instance): The live instance to operate on.
 
 Returns:
-The key of a victim to evict, or `nil` if no eviction is needed."
-  (-let-pattern*
+  (any): The key of a victim to evict, or `nil` if no eviction is needed."
+  (cacheus-let*
       (((&struct :options opts :runtime-data data) instance)
        ((&struct :capacity cap :eviction-strategy strategy :logger logger-opt) opts)
        ((&struct :cache-ht cache-ht :order-data order :frequency-ht freq-ht) data)
@@ -218,18 +231,18 @@ This pure function determines if a cache entry is stale based on several
 criteria, returning a reason string if stale, nil otherwise.
 
 Arguments:
-- `KEY`: The cache key.
-- `ENTRY-STRUCT`: The cache entry struct.
-- `ENTRY-TIMESTAMP`: Timestamp of the entry.
-- `TTL`: Time-to-live in seconds.
-- `ENTRY-VERSION`: Version of the entry.
-- `CURRENT-FUNC-VERSION`: Current functional version of the cache.
-- `DIRTY-P-FN`: Custom predicate for staleness.
-- `REFRESH-TS`: Timestamp of last refresh (for sliding TTL).
-- `LOGGER`: The resolved logger function.
+- `KEY` (any): The cache key.
+- `ENTRY-STRUCT` (struct): The cache entry struct.
+- `ENTRY-TIMESTAMP` (ts): Timestamp of the entry.
+- `TTL` (number): Time-to-live in seconds.
+- `ENTRY-VERSION` (any): Version of the entry.
+- `CURRENT-FUNC-VERSION` (any): Current functional version of the cache.
+- `DIRTY-P-FN` (function): Custom predicate for staleness.
+- `REFRESH-TS` (ts): Timestamp of last refresh (for sliding TTL).
+- `LOGGER` (function): The resolved logger function.
 
 Returns:
-A string describing the reason if stale, or `nil` if fresh."
+  (string|nil): A string describing the reason if stale, or `nil` if fresh."
   (cond
    ((not entry-timestamp)
     (funcall logger :warn "stale-p: Entry %S lacks timestamp. Stale." key)
@@ -255,12 +268,12 @@ A string describing the reason if stale, or `nil` if fresh."
   "Return a list of keys from `TIMESTAMPS-HT` that have expired by `TTL`.
 
 Arguments:
-- `TIMESTAMPS-HT`: A hash table mapping keys to `ts` timestamp objects.
-- `TTL`: The time-to-live in seconds.
-- `LOGGER`: The resolved logger function for debug messages.
+- `TIMESTAMPS-HT` (hash-table): A mapping keys to `ts` timestamp objects.
+- `TTL` (number): The time-to-live in seconds.
+- `LOGGER` (function): The resolved logger function for debug messages.
 
 Returns:
-A list of keys that are considered expired."
+  (list): A list of keys that are considered expired."
   (let ((expired '()))
     (when timestamps-ht
       (ht-map timestamps-ht
@@ -292,7 +305,7 @@ Arguments:
 - `:get-mtime` (function): A `(lambda (key-or-entry))` -> `ts` mtime object.
 
 Returns:
-A lambda `(lambda (key entry))` that returns `t` if the entry is dirty."
+  (function): A lambda `(lambda (key entry))` that returns `t` if dirty."
   (lambda (key entry)
     (or
      ;; TTL check

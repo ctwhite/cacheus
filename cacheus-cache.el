@@ -1,5 +1,6 @@
 ;;; cacheus-cache.el --- A configurable, TTL-aware cache framework -*- lexical-binding: t; -*-
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Commentary:
 ;;
 ;; This file provides the `cacheus-cache!` macro, a user-friendly way to
@@ -7,21 +8,15 @@
 ;; builds upon the core framework to handle persistence, eviction, and other
 ;; advanced features.
 ;;
-;; Core Features via `cacheus-cache!`:
-;; - Defines a new cache instance with a unique name.
-;; - Generates a specific `cl-defstruct` for cache entries, allowing custom
-;;   fields via the `:fields` keyword.
-;; - Sets up underlying `defvar`s for data storage.
-;; - Generates a full suite of helper functions (get, put, clear, etc.).
-;; - Registers the cache with the global `cacheus-global-cache-registry`.
-;;
-;; Customization Options:
-;; See `cacheus-options` struct for a full list of keywords, including `:ttl`,
-;; `:capacity`, `:version`, `:cache-file`, `:fields`, and `:tags-fn`.
+;; Interaction with the cache is handled via the universal `cacheus-get!`
+;; and `cacheus-put!` macros defined in `cacheus-core.el`.
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Code:
 
 (require 'cl-lib)
+
+(eval-when-compile (require 'cl-lib))
 
 (require 'cacheus-core)
 
@@ -35,7 +30,11 @@
 (cl-defstruct (cacheus-cache-instance (:include cacheus-instance))
   "A type-specific instance struct for generic caches.
 This struct is functionally identical to the base `cacheus-instance` but
-provides a distinct type for caches created with `cacheus-cache!`.")
+provides a distinct type for caches created with `cacheus-cache!`.
+
+Fields:
+- `options` (cacheus-options): Inherited. User-provided configuration.
+- `symbols` (cacheus-symbols): Inherited. Generated names for vars/functions.")
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Internal Helpers
@@ -44,12 +43,12 @@ provides a distinct type for caches created with `cacheus-cache!`.")
   "Parse and validate the top-level arguments for `cacheus-cache!`.
 
 Arguments:
-- `NAME-SYM`: The symbol provided as the cache name.
-- `OPTIONS-LIST`: The plist of options.
-- `MACRO-NAME`: The name of the macro calling this helper, for error messages.
+- `NAME-SYM` (symbol): The symbol provided as the cache name.
+- `OPTIONS-LIST` (plist): The plist of options.
+- `MACRO-NAME` (symbol): The name of the macro calling this helper.
 
 Returns:
-A list `(NAME-SYM OPTIONS-PLIST)` if valid, or signals an error."
+  (list): A list `(NAME-SYM OPTIONS-PLIST)` if valid, or signals an error."
   (unless (symbolp name-sym)
     (error "%S: NAME argument must be a symbol, got %S"
            macro-name name-sym))
@@ -60,76 +59,67 @@ A list `(NAME-SYM OPTIONS-PLIST)` if valid, or signals an error."
 
 (defun cacheus-cache--create-instance (name-sym options-plist)
   "Create a `cacheus-cache-instance` blueprint from macro arguments.
-This function orchestrates the creation of the options and symbols
-structs. It calls the core generators and then adds this module's
-specific logic for handling custom `:fields` for the cache entry struct.
 
 Arguments:
-- `NAME-SYM`: The cache name symbol.
-- `OPTIONS-PLIST`: The plist of options from the macro call.
+- `NAME-SYM` (symbol): The cache name symbol.
+- `OPTIONS-PLIST` (plist): The plist of options from the macro call.
 
 Returns:
-A complete `cacheus-cache-instance` struct."
+  (cacheus-cache-instance): A complete instance blueprint struct."
   ;; 1. Get the generic options and symbols from the core generators.
   (let* ((options (cacheus-create-options name-sym options-plist))
          (symbols (cacheus-generate-symbols options)))
 
     ;; 2. Handle `:fields`, an option specific to `cacheus-cache!`. The user
-    ;; can provide custom fields to be added to the cache entry struct. This
-    ;; logic appends those fields to the default set.
+    ;; can provide custom fields to be added to the cache entry struct.
     (let ((fields-data (plist-get options-plist :fields)))
       (when fields-data
         (setf (cacheus-symbols-all-struct-fields-for-entries symbols)
               (append (cacheus-symbols-all-struct-fields-for-entries symbols)
                       fields-data))))
 
-    ;; 3. Create and return the final instance.
+    ;; 3. Create and return the final instance blueprint.
+    ;; The `:runtime-data` slot is intentionally omitted, as runtime state
+    ;; is now managed via global defvars that are lazily initialized.
     (make-cacheus-cache-instance
      :options options
-     :symbols symbols
-     :runtime-data (make-cacheus-runtime-data))))
+     :symbols symbols)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; Public Macros and Functions
+;;; Public Macro
 
+;;;###autoload
 (defmacro cacheus-cache! (name &rest options-list)
   "Define a namespaced, general-purpose, and optionally persistent cache.
-This macro generates a complete cache instance with its own data structures
-and a suite of helper functions for management (e.g., `get`, `put`, `clear`).
+This macro generates the necessary data structures for the cache.
+Interaction is handled via `cacheus-get!` and `cacheus-put!`.
 
 Arguments:
 - `NAME` (symbol): The base name for the cache (e.g., `my-app-data`).
-  This name is used to prefix all generated functions and variables.
-- `OPTIONS-LIST` (plist): Keyword arguments for customization. See the
-  `cacheus-options` struct definition for a full list.
+- `OPTIONS-LIST` (plist): Keyword arguments for customization.
 
 Example:
   (cacheus-cache! my-project-cache
     :capacity 100
-    :ttl (* 60 60 24) ; 1 day TTL
-    :cache-file \"~/.emacs.d/cache/my-project.json\"
-    :logger t)
+    :ttl (* 60 60 24))
 
-  (cacheus-my-project-cache-put \"file-status.el\" \"modified\")
+  (cacheus-put! 'my-project-cache \"file-status.el\" \"modified\")
   (cacheus-get! 'my-project-cache \"file-status.el\") ; => \"modified\"
 
 Returns:
-The `NAME` symbol, for convenience."
-  (declare (indent 1))
-  ;; 1. Parse args and create the instance blueprint.
+  (symbol): The `NAME` of the cache, for convenience."
+  (declare (indent 2))
   (let* ((parsed-args (cacheus-cache--parse-macro-args name options-list
                                                        'cacheus-cache!))
          (name-sym (car parsed-args))
          (opts-plist (cadr parsed-args))
-         (instance (cacheus-cache--create-instance name-sym opts-plist)))
-    ;; 2. Delegate the entire code generation to the backend function.
+         (instance (cacheus-cache--create-instance name-sym opts-plist))
+         (instance-var (intern (format "cacheus--%s-instance" (symbol-name name-sym)))))
     `(progn
-       ,(cacheus-make-cache-backend
-         instance
-         :instance-constructor 'make-cacheus-cache-instance
-         ;; A generic cache does not have a default way to compute a value
-         ;; on a cache miss, so its compute thunk is nil.
-         :compute-thunk-form nil)
+       ;; Generate the backend variables and admin functions.
+       ,(cacheus-make-cache-backend instance instance-var)
+       ;; Define the variable that holds the cache's configuration at runtime.
+       (defvar ,instance-var ',instance)
        ',name-sym)))
 
 (provide 'cacheus-cache)

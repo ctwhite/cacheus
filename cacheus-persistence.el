@@ -1,5 +1,6 @@
-;;; cacheus-persistence.el --- Core persistence and loading utilities for Cacheus -*- lexical-binding: t; -*-
+;;; cacheus-persistence.el --- Persistence and loading utilities for Cacheus -*- lexical-binding: t; -*-
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Commentary:
 ;;
 ;; This file provides the fundamental mechanisms for persisting Cacheus
@@ -7,6 +8,7 @@
 ;; integrity through atomic save operations and validates loaded cache files
 ;; against format and functional versions.
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Code:
 
 (require 'cl-lib)
@@ -38,13 +40,13 @@ This function serializes the cache's runtime data (entries, ordering,
 metadata) into a JSON string and saves it atomically.
 
 Arguments:
-- `INSTANCE`: The live `cacheus-instance` to persist.
-- `LOGGER`: The resolved logger function.
+- `INSTANCE` (cacheus-instance): The live instance to persist.
+- `LOGGER` (function): The resolved logger function.
 
 Returns:
-`t` on successful persistence, `nil` if skipped (e.g., no cache file is
-configured), or signals `cacheus-error` on failure."
-  (-let-pattern*
+  (boolean): `t` on successful persistence, `nil` if skipped (e.g., no
+cache file is configured), or signals `cacheus-error` on failure."
+  (cacheus-let*
       (((&struct :options opts :symbols syms :runtime-data data) instance)
        ((&struct :name name :cache-file file :version ver
                  :eviction-strategy evic-strat :capacity cap
@@ -113,12 +115,13 @@ This function validates the cache file, clears the current runtime data,
 and then populates the instance by deserializing the JSON content.
 
 Arguments:
-- `INSTANCE`: The live `cacheus-instance` to load data into.
-- `LOGGER`: The resolved logger function.
+- `INSTANCE` (cacheus-instance): The live instance to load data into.
+- `LOGGER` (function): The resolved logger function.
 
 Returns:
-`t` on successful loading, or `nil` if validation fails or an error occurs."
-  (-let-pattern*
+  (boolean): `t` on successful loading, or `nil` if validation fails or an
+error occurs."
+  (cacheus-let*
       (((&struct :options opts :symbols syms :runtime-data data) instance)
        ((&struct :name name :cache-file file :version ver :capacity cap
                  :eviction-strategy evic-strat) opts)
@@ -199,16 +202,16 @@ Returns:
 
 (defun cacheus-save-atomically (file-path content logger)
   "Atomically save string `CONTENT` to `FILE-PATH`.
-This uses `f-atomic-write-to-file` to prevent data corruption if Emacs
-crashes or is killed during the save operation.
+This uses a temporary file and rename operation to prevent data
+corruption if Emacs crashes or is killed during the save.
 
 Arguments:
-- `FILE-PATH`: The absolute path to the destination file.
-- `CONTENT`: The string content to save.
-- `LOGGER`: A resolved logger function.
+- `FILE-PATH` (string): The absolute path to the destination file.
+- `CONTENT` (string): The string content to save.
+- `LOGGER` (function): A resolved logger function.
 
 Returns:
-`t` on success, or signals `cacheus-error` on failure."
+  (boolean): `t` on success, or signals `cacheus-error` on failure."
   (condition-case-unless-debug err
       (f-atomic-write-to-file file-path content)
     (error
@@ -223,13 +226,13 @@ Validates file existence, JSON parsing, format version, and the cache's
 functional version against current values.
 
 Arguments:
-- `FILE-PATH`: The path to the cache file.
-- `EXPECTED-FORMAT-VERSION`: The expected file format version string.
-- `CURRENT-FUNC-VERSION`: The current functional version of the cache.
-- `LOGGER`: A resolved logger function.
+- `FILE-PATH` (string): The path to the cache file.
+- `EXPECTED-FORMAT-VERSION` (string): The expected file format version string.
+- `CURRENT-FUNC-VERSION` (any): The current functional version of the cache.
+- `LOGGER` (function): A resolved logger function.
 
 Returns:
-A plist of the form `(:valid t/nil :reason string :raw-data alist)`."
+  (plist): A plist of the form `(:valid t/nil :reason string :raw-data alist)`."
   (cl-block cacheus-load-and-validate-cache-file
     (unless (file-exists-p file-path)
       (funcall logger :warn "load: Cache file %s does not exist." file-path)

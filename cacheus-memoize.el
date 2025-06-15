@@ -1,35 +1,21 @@
 ;;; cacheus-memoize.el --- A TTL-aware memoization framework -*- lexical-binding: t; -*-
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Commentary:
 ;;
-;; This file builds upon the core Cacheus framework to provide robust
-;; memoization for Emacs Lisp functions. It offers both compile-time and
-;; runtime memoization, integrating features like TTL-based expiration,
-;; capacity management, persistence, and tagging.
-;;
-;; Key features provided by this library:
-;; - `cacheus-memoize!`: The primary macro for defining a memoized function.
-;;
-;; - `cacheus-memoize-fn`: A function to memoize an *existing* function at
-;;   runtime, returning a new lambda with helper functions attached.
-;;
-;; - `cacheus-macro-memoize!`: A specialized macro for memoizing the
-;;   *expansion* of another macro at compile-time.
-;;
-;; Customization Options:
-;; - `:key-fn`: A function `(lambda (args...))` to transform function arguments
-;;   into a canonical cache key.
-;; - `:predicate`: A function `(lambda (value))` that returns non-nil if a
-;;   result is worth caching.
-;; - Other options from `cacheus-cache!` are also supported, including `:ttl`,
-;;   `:capacity`, `:version`, `:fields`, `:meta-fn`, and `:tags-fn`.
+;; This file provides the `cacheus-memoize!` macro, a user-friendly way to
+;; define memoized functions. It builds upon the core framework to handle
+;; TTL-based expiration, capacity management, persistence, and tagging.
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Code:
 
 (require 'cl-lib)
 (require 'ht)
 (require 's)
 (require 'dash)
+
+(eval-when-compile (require 'cl-lib))
 
 (require 'cacheus-core)
 
@@ -51,7 +37,7 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Internal Helpers
 
-(defun cacheus-memoize--parse-args (original-args _macro-name)
+(defun cacheus-memoize--parse-args (original-args macro-name)
   "Parse `(docstring? options* body*)` from a macro's arguments."
   (let (docstring options-plist body-forms
         (args (copy-sequence original-args)))
@@ -65,18 +51,19 @@
       (setq options-plist (cl-subseq args 0 options-len))
       (setq body-forms (nthcdr options-len args)))
     (unless (cacheus-plist-valid-p options-plist)
-      (error "cacheus: Options list is not a valid plist: %S"
-             options-plist))
+      (error "%S: Options list is not a valid plist: %S"
+             macro-name options-plist))
     (list docstring options-plist body-forms)))
 
 (defun cacheus-memoize--create-options (name-sym options-plist)
   "Create and validate a `cacheus-memoize-options` struct."
   (let ((base-options (cacheus-create-options name-sym options-plist)))
-    (-let-pattern* (((&plist :key-fn key-fn-opt :arglist arglist)
-                     options-plist))
+    (cacheus-let* (((&plist :key-fn key-fn-opt :arglist arglist)
+                    options-plist))
       (cacheus-validate-fn-option key-fn-opt :key-fn)
       (when (and arglist (not (listp arglist)))
-        (error "cacheus-memoize: :arglist must be a list, got %S" arglist))
+        (error "cacheus-memoize: :arglist must be a list, got %S"
+               arglist))
       (make-cacheus-memoize-options
        :key-fn key-fn-opt
        :arglist arglist
@@ -100,22 +87,13 @@
        :meta-fn (cacheus-options-meta-fn base-options)
        :tags-fn (cacheus-options-tags-fn base-options)))))
 
-(defun cacheus-memoize--generate-symbols (options-struct)
-  "Generate a `cacheus-symbols` struct for a memoized function."
-  (let ((base-symbols (cacheus-generate-symbols options-struct)))
-    (setf (cacheus-symbols-inflight-var base-symbols)
-          (intern (format "%s-inflight-ht"
-                          (cacheus-symbols-sym-prefix base-symbols))))
-    base-symbols))
-
 (defun cacheus-memoize--create-instance (name-sym options-list)
   "Create a `cacheus-memoize-instance` blueprint from macro arguments."
   (let* ((options (cacheus-memoize--create-options name-sym options-list))
-         (symbols (cacheus-memoize--generate-symbols options)))
+         (symbols (cacheus-generate-symbols options)))
     (make-cacheus-memoize-instance
      :options options
-     :symbols symbols
-     :runtime-data (make-cacheus-runtime-data))))
+     :symbols symbols)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Public Macros and Functions
@@ -123,7 +101,7 @@
 ;;;###autoload
 (defmacro cacheus-memoize! (name args &rest body-and-options)
   "Define a memoized Emacs Lisp function `NAME`."
-  (declare (indent 2))
+  (declare (indent 1))
   (let* ((parsed-args (cacheus-memoize--parse-args
                        body-and-options 'cacheus-memoize!))
          (docstring (car parsed-args))
@@ -133,28 +111,43 @@
                          opts-plist
                        (plist-put opts-plist :name name)))
          (instance (cacheus-memoize--create-instance name final-opts))
-         (symbols (cacheus-instance-symbols instance))
          (options (cacheus-instance-options instance))
-         (get-fn-sym (cacheus-symbols-get-fn symbols))
-         (key-fn-opt (cacheus-memoize-options-key-fn options)))
+         (key-fn-opt (cacheus-memoize-options-key-fn options))
+         (async-opt (cacheus-options-async options))
+         (instance-var (intern (format "cacheus--%s-instance" (symbol-name name)))))
     (unless (listp args) (error "`ARGS` must be a list, got %S" args))
-    (let ((key-fn (or key-fn-opt `(lambda ,args (list ,@args)))))
+    (let* ((key-fn (or key-fn-opt `(lambda ,args (list ,@args))))
+           (backend-progn (cacheus-make-cache-backend instance instance-var)))
       `(progn
-         ,(cacheus-make-cache-backend
-           instance
-           :instance-constructor 'make-cacheus-memoize-instance)
+         ,backend-progn
+         (defvar ,instance-var ',instance)
          (defun ,name ,args
            ,(or docstring (format "Memoized version of %S." name))
-           (funcall #',get-fn-sym
-                    (funcall ,key-fn ,@args)
-                    t
-                    (list ,@args)
-                    (lambda () ,@body)))
+           ;; The call to `cacheus--get-instance-by-name` ensures that the
+           ;; cache is lazily initialized on the first call.
+           (cacheus-get-or-compute
+            (cacheus--get-instance-by-name ',name)
+            (funcall ,key-fn ,@args)
+            (lambda () ,@body)
+            :user-key (list ,@args)
+            :async ,async-opt))
          ',name))))
 
 ;;;###autoload
 (defmacro cacheus-macro-memoize! (name args &rest body-and-options)
-  "Define a macro `NAME` that memoizes its own expansion at compile time."
+  "Define a macro `NAME` that memoizes its own expansion at compile time.
+This is useful for complex macros whose expansion is computationally
+expensive and deterministic based on their arguments. The memoization happens
+during Emacs's compilation phase.
+
+Arguments:
+- `NAME` (symbol): The symbol for the new memoized macro.
+- `ARGS` (list): A list of arguments for the macro, like `defmacro`.
+- `BODY-AND-OPTIONS` (list): The body of the macro, optionally preceded by a
+  docstring and a plist of options.
+
+Returns:
+  (symbol): The `NAME` of the macro just defined."
   (declare (indent 2))
   (let* ((parsed-args (cacheus-memoize--parse-args
                        body-and-options 'cacheus-macro-memoize!))
@@ -184,20 +177,17 @@
 ;;;###autoload
 (defun cacheus-memoize-fn (fn &rest options-plist)
   "Return a memoized version of an existing function `FN` at runtime.
-This allows for runtime memoization of arbitrary functions. The returned
-lambda will have helper functions (clear, save, inspect) attached as
-function properties for programmatic interaction.
-
-The `:arglist` option is required so the memoized function can have a
-correct signature.
+This allows you to take any Emacs Lisp function `FN` and wrap it with
+memoization capabilities. This is useful for functions that cannot be
+defined with `cacheus-memoize!` directly.
 
 Arguments:
-- `FN`: The function or function symbol to memoize.
-- `OPTIONS-PLIST`: A plist of keyword options, such as `:ttl`, `:capacity`,
-  `:key-fn`, and the required `:arglist`.
+- `FN` (function): The function (symbol or lambda) to be memoized.
+- `OPTIONS-PLIST` (plist): Options to configure the memoized function.
+  Crucially, `:arglist` must be provided.
 
 Returns:
-A new function (a lambda closure) that acts as the memoized version of `FN`."
+  (function): A new lambda function that wraps `FN` with memoization."
   (let* ((final-opts (if (plist-member options-plist :name)
                          options-plist
                        (plist-put options-plist :name fn)))
@@ -205,6 +195,7 @@ A new function (a lambda closure) that acts as the memoized version of `FN`."
          (opts (cacheus-instance-options instance))
          (syms (cacheus-instance-symbols instance))
          (arglist (cacheus-memoize-options-arglist opts))
+         (async-opt (cacheus-options-async opts))
          (key-fn (or (cacheus-memoize-options-key-fn opts)
                      `(lambda ,arglist (list ,@arglist)))))
     (unless arglist
@@ -216,13 +207,11 @@ A new function (a lambda closure) that acts as the memoized version of `FN`."
                         (cacheus-get-or-compute
                          instance
                          key
-                         ;; This thunk executes the original function on a cache miss.
                          (lambda () (apply fn args))
-                         :user-key args
-                         ;; Runtime memoization does not currently support async.
-                         :async (cacheus-options-async opts))))
-                    args))))
-      ;; Attach helper functions as properties to the returned lambda.
+                         :user-key (list ,@arglist)
+                         :async async-opt)))
+                    args)))
+      ;; Attach helper functions as properties to the memoized lambda.
       (let* ((clear-fn-sym (cacheus-symbols-clear-fn syms))
              (save-fn-sym (cacheus-symbols-save-fn syms))
              (inv-fn-sym (cacheus-symbols-invalidate-tags-fn syms))
@@ -258,7 +247,7 @@ A new function (a lambda closure) that acts as the memoized version of `FN`."
         (put memoized-lambda 'inspect-entry insp-entry-fn-sym)
         (put memoized-lambda 'cache-instance-name
              (cacheus-options-name opts)))
-      memoized-lambda)))
+      memoized-lambda))))
 
 (provide 'cacheus-memoize)
 ;;; cacheus-memoize.el ends here

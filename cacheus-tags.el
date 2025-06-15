@@ -1,5 +1,6 @@
 ;;; cacheus-tags.el --- Core tag management utilities for Cacheus -*- lexical-binding: t; -*-
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Commentary:
 ;;
 ;; This file centralizes the core logic for managing tags associated with cache
@@ -8,8 +9,9 @@
 ;;
 ;; This module works in conjunction with `cacheus-eviction.el` and
 ;; `cacheus-storage.el` to ensure that tag indexes are kept consistent as
-;; entries are added, accessed, or removed from the cache.
+;; entries are added or removed from the cache.
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Code:
 
 (require 'cl-lib)
@@ -26,6 +28,33 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Tag Management
 
+(defun cacheus-update-entry-tag-info (ekey tags instance logger)
+  "Update all tag indexes for `EKEY` with `TAGS`.
+This is called when an entry is stored. It ensures that the mapping from
+the entry key to its tags, and the reverse mapping from each tag to its
+keys, are both correctly updated.
+
+Arguments:
+- `EKEY` (any): The effective key of the entry being updated.
+- `TAGS` (list): A list of symbols to associate with the entry.
+- `INSTANCE` (cacheus-instance): The live instance of the cache.
+- `LOGGER` (function): The resolved logger function.
+
+Returns:
+  nil."
+  (cacheus-let*
+      (((&struct :runtime-data data) instance)
+       ((&struct :entry-tags-ht et-ht :tags-idx-ht tags-idx-ht) data))
+    (when (and tags et-ht tags-idx-ht)
+      (let ((unique-tags (-distinct tags :test #'equal)))
+        (when unique-tags
+          ;; Associate the key with its tags.
+          (ht-set! et-ht ekey unique-tags)
+          ;; Update the reverse index (tag -> list of keys).
+          (-each unique-tags
+                 (lambda (tag)
+                   (cl-pushnew ekey (ht-get tags-idx-ht tag) :test #'equal))))))))
+
 (defun cacheus-remove-entry-tag-info (ekey instance logger)
   "Remove all tag information for `EKEY` from the instance's tag indexes.
 This is a critical cleanup operation called during entry eviction to ensure
@@ -35,13 +64,13 @@ the tag system remains consistent. It operates by:
 3. Removing `EKEY` itself from `entry-tags-ht`.
 
 Arguments:
-- `EKEY`: The effective key of the entry being removed.
-- `INSTANCE`: The live `cacheus-instance` to operate on.
-- `LOGGER`: A resolved logger function.
+- `EKEY` (any): The effective key of the entry being removed.
+- `INSTANCE` (cacheus-instance): The live instance to operate on.
+- `LOGGER` (function): A resolved logger function.
 
 Returns:
-`nil`."
-  (-let-pattern*
+  nil."
+  (cacheus-let*
       (((&struct :options opts :runtime-data data) instance)
        ((&struct :name name) opts)
        ((&struct :entry-tags-ht et-ht :tags-idx-ht tags-idx-ht) data))
@@ -61,14 +90,15 @@ Returns:
         (ht-remove! et-ht ekey)
         (funcall logger :debug "[C:%S] Removed tags for %S" name ekey))))
 
+;;;###autoload
 (cl-defun cacheus-invalidate-keys-by-tags
     (runtime-instance tags &key (all-must-match nil) (run-hooks t))
   "Find and evict cache entries based on a list of `TAGS`.
 This is the core implementation for tag-based invalidation.
 
 Arguments:
-- `RUNTIME-INSTANCE`: The live `cacheus-instance` object.
-- `TAGS`: A single tag symbol or a list of symbols to invalidate by.
+- `RUNTIME-INSTANCE` (cacheus-instance): The live instance object.
+- `TAGS` (list|symbol): A single tag symbol or a list of symbols.
 - `:all-must-match` (boolean): If non-nil, evicts entries that have ALL
   specified tags (AND logic). If nil (default), evicts entries that
   have ANY of the specified tags (OR logic).
@@ -76,9 +106,9 @@ Arguments:
   for each entry evicted by this operation.
 
 Returns:
-A list of the keys that were invalidated."
+  (list): A list of the keys that were invalidated."
   (cl-block cacheus-invalidate-keys-by-tags
-    (-let-pattern*
+    (cacheus-let*
         (((&struct :options opts :runtime-data data) runtime-instance)
          ((&struct :name name :logger logger-opt :expiration-hook hook) opts)
          ((&struct :cache-ht cache-ht :tags-idx-ht tags-idx-ht) data)

@@ -1,11 +1,13 @@
 ;;; cacheus-util.el --- Core utilities for the Cacheus framework -*- lexical-binding: t; -*-
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Commentary:
 ;;
 ;; This file is the home for fundamental utility functions and macros that are
 ;; used across the Cacheus caching framework. It centralizes common operations
 ;; to promote code reuse, consistency, and a clean architecture.
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Code:
 
 (require 'cl-lib)
@@ -14,6 +16,7 @@
 (require 's)
 (require 'ring)
 (require 'dash)
+(require 'ts)
 
 (require 'cacheus-structs)
 
@@ -22,32 +25,32 @@
 
 (defun cacheus-resolve-logger (logger-opt)
   "Resolve `LOGGER-OPT` to a callable logger function.
+This function correctly handles symbols that are hook variables by
+returning a lambda that will execute the hook.
 
 Arguments:
 - `LOGGER-OPT`: Can be `t` (for `message`), `nil` (for a no-op function),
-  a function symbol, or a lambda.
+  a function symbol, a hook symbol, or a lambda.
 
 Returns:
-A callable logger function that accepts `(LEVEL FORMAT &rest ARGS)`."
+  (function): A callable logger function that accepts `(LEVEL FORMAT &rest ARGS)`."
   (cond
    ((eq logger-opt t) #'message)
    ((null logger-opt) (lambda (&rest _args) nil))
    ((functionp logger-opt) logger-opt)
    ((symbolp logger-opt)
-    (let ((resolved-func nil))
-      (if (and (symbolp logger-opt) (boundp logger-opt))
-          (let ((val (symbol-value logger-opt)))
-            (if (functionp val)
-                (setq resolved-func val))))
-      (if resolved-func
-          resolved-func
-        ;; If resolved-func is nil, then check if the symbol itself is fbound
-        (if (fboundp logger-opt)
-            (symbol-function logger-opt)
-          ;; If symbol is not fbound or its value is not a function, fall through to the final t clause
-          nil ; This makes this branch effectively fall through if no function is found
-          ))))
-   (t (warn "cacheus: Invalid logger option %S; using no-op." logger-opt) (lambda (&rest _args) nil))))
+    (cond
+     ((fboundp logger-opt) (symbol-function logger-opt))
+     ((boundp logger-opt)
+      (lambda (level fmt &rest args)
+        (let ((final-args (-flatten args)))
+          (apply #'run-hook-with-args logger-opt level fmt final-args))))
+     (t
+      (warn "cacheus: Logger symbol %S is void; using no-op." logger-opt)
+      (lambda (&rest _args) nil))))
+   (t (warn "cacheus: Invalid logger option %S; using no-op." logger-opt)
+      (lambda (&rest _args) nil))))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Key Serialization Utilities
 
@@ -59,12 +62,12 @@ common types like strings, symbols, and numbers directly, and uses
 
 Arguments:
 - `KEY`: The Elisp key to stringify.
-- `LOGGER`: A resolved logger function for error reporting.
+- `LOGGER` (function): A resolved logger function for error reporting.
 
 Returns:
-A string representation of `KEY`, or `nil` on failure."
+  (string): A string representation of `KEY`, or `nil` on failure."
   (condition-case-unless-debug err
-      (typecase key
+      (cl-typecase key
         (string key)
         (symbol (symbol-name key))
         (number (number-to-string key))
@@ -78,11 +81,11 @@ A string representation of `KEY`, or `nil` on failure."
 This is the reverse of `cacheus-stringify-key`.
 
 Arguments:
-- `SKEY`: The stringified key from a cache file.
-- `LOGGER`: A resolved logger function for error reporting.
+- `SKEY` (string): The stringified key from a cache file.
+- `LOGGER` (function): A resolved logger function for error reporting.
 
 Returns:
-The parsed Elisp key, or `nil` on failure."
+  (any): The parsed Elisp key, or `nil` on failure."
   (condition-case-unless-debug err
       (read skey)
     (error
@@ -98,10 +101,10 @@ A well-formed plist must have an even number of elements, and every
 other element starting from the first must be a keyword.
 
 Arguments:
-- `PLIST`: The list to check.
+- `PLIST` (list): The list to check.
 
 Returns:
-`t` if `PLIST` is a valid property list, `nil` otherwise."
+  (boolean): `t` if `PLIST` is a valid property list, `nil` otherwise."
   (or (null plist)
       (and (zerop (% (length plist) 2))
            (cl-loop for i from 0 below (length plist) by 2
@@ -110,7 +113,14 @@ Returns:
 (defun cacheus-validate-fn-option (value option-name)
   "Validate that VALUE is suitable for an option that expects a function.
 An acceptable value is nil, a symbol (quoted or not), a lambda form,
-or a function object. Signals an error if the validation fails."
+or a function object. Signals an error if the validation fails.
+
+Arguments:
+- `VALUE` (any): The option value to validate.
+- `OPTION-NAME` (keyword): The name of the option for error messages.
+
+Returns:
+  nil. Signals an error as a side-effect if invalid."
   (when (and value
              (not (or (symbolp value)
                       (functionp value)
@@ -125,11 +135,11 @@ This function introspects the `STRUCT-INSTANCE` to find all its slot names
 and creates a plist of the form `(:slot1 val1 :slot2 val2 ...)`.
 
 Arguments:
-- `STRUCT-INSTANCE`: The `cl-defstruct` instance.
+- `STRUCT-INSTANCE` (struct): The `cl-defstruct` instance.
 
 Returns:
-A property list representation of the struct's slots and values, or `nil`
-if `STRUCT-INSTANCE` is not a valid struct."
+  (plist): A property list representation of the struct's slots and values,
+or `nil` if `STRUCT-INSTANCE` is not a valid struct."
   (when (and (consp struct-instance) (symbolp (car struct-instance)))
     (let* ((struct-type (type-of struct-instance))
            (slot-names-vec (get struct-type 'cl-struct-slot-info)))
@@ -139,23 +149,10 @@ if `STRUCT-INSTANCE` is not a valid struct."
                            (slot-value struct-instance it))
                      (cl-coerce slot-names-vec 'list)))))))
 
-(defmacro -let-pattern* (bindings &rest body)
+(defmacro cacheus-let* (bindings &rest body)
   "A destructuring `let*` that supports `&struct` for `cl-defstruct`.
 This macro extends `-let*` by adding a `(&struct ...)` keyword,
-allowing for convenient binding of struct slots to local variables.
-
-The binding form is `((&struct :SLOT-1 VAR-1 :SLOT-2) STRUCT-FORM)`.
-This mimics the behavior of `dash`'s `&plist` destructuring. All other
-binding forms are passed directly to `-let*`.
-
-It works by expanding each `&struct` form into a series of `let*`
-bindings that call the appropriate accessor function for each slot.
-
-Usage Example:
-  (cl-defstruct person :name :age)
-  (let ((p1 (make-person :name \"Alice\" :age 30)))
-    (-let-pattern* (((&struct :name person-name :age) p1))
-      (message \"Name: %s, Age: %d\" person-name age)))"
+allowing for convenient binding of struct slots to local variables."
   (declare (indent 1))
   (cl-check-type bindings list)
   (let ((final-forms nil))
@@ -174,10 +171,6 @@ Usage Example:
                      (acc-name (substring (symbol-name slot-key) 1)))
                 (unless (keywordp slot-key)
                   (error "Struct slot key must be a keyword: %S" slot-key))
-                ;; NOTE: Using `(type-of ,g-struct)` here is a non-standard macro expansion pattern
-                ;; that relies on specific behavior of your Emacs environment.
-                ;; In typical Emacs Lisp macro expansion, `(type-of symbol)` evaluates to `symbol`,
-                ;; not the runtime type of the variable.
                 (push `(,var-name
                         (let ((accessor (intern (format "%s-%s"
                                                         (type-of ,g-struct)
@@ -189,71 +182,76 @@ Usage Example:
        ,@body)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; Instance Reconstruction
+;;; Inspection Dispatcher
 
-(defun cacheus-resolve-option-value (value)
-  "Evaluate VALUE if it is a symbol, otherwise return it.
-This is used at runtime to resolve cache options that can be provided
-as either a literal value or a variable."
-  (if (symbolp value)
-      (symbol-value value)
-    value))
-
-(defun cacheus-get-runtime-instance-from-macro-vars
-    (blueprint-ref instance-constructor)
-  "Reconstruct a live cache instance at runtime from its blueprint.
-This is the bridge between a compile-time macro definition and the live
-runtime state of its associated global variables (`defvar`s). It allows
-generic functions to operate on specific cache instances.
+(defun cacheus-inspect-instance-dispatch (instance key-str)
+  "Display inspection details for INSTANCE in a new buffer.
+If `KEY-STR` is nil, displays all entries. If `KEY-STR` is a string,
+displays details for that specific key. This is the universal inspection
+logic called by all generated `-inspect` helper functions.
 
 Arguments:
-- `BLUEPRINT-REF`: A symbol (the cache name) or a macro-time instance struct.
-- `INSTANCE-CONSTRUCTOR`: The constructor for the specific instance type.
-
-Returns:
-A live `cacheus-instance` populated with current runtime data."
-  (let ((blueprint (if (symbolp blueprint-ref)
-                       (when-let ((entry (gethash blueprint-ref
-                                                  cacheus-global-cache-registry)))
-                         (plist-get entry :macro-time-instance))
-                     blueprint-ref)))
-    (unless blueprint
-      (error "cacheus: Blueprint for %S not found in registry" blueprint-ref))
-    (let* ((options (cacheus-instance-options blueprint))
-           (symbols (cacheus-instance-symbols blueprint))
-           (live-data-plist (cacheus-default-slot-value-provider-lambda symbols))
-           (runtime-instance (funcall instance-constructor
-                                      :options options :symbols symbols)))
-      (setf (cacheus-instance-runtime-data runtime-instance)
-            (apply #'make-cacheus-runtime-data live-data-plist))
-      runtime-instance)))
-
-(defun cacheus-default-slot-value-provider-lambda (m-syms)
-  "Return a plist of live runtime data for a `cacheus-symbols` instance.
-This function is the default implementation for retrieving the current
-values of all cache-related `defvar`s. It safely checks if optional
-feature variables are bound before accessing them.
-
-Arguments:
-- `M-SYMS`: The `cacheus-symbols` struct from a macro-time instance.
-
-Returns:
-A plist containing the live runtime data for the cache, suitable for
-passing to `make-cacheus-runtime-data`."
-  (list
-   :cache-ht      (symbol-value (cacheus-symbols-cache-var m-syms))
-   :timestamps-ht (when-let ((s (cacheus-symbols-timestamps-var m-syms)))
-                    (when (boundp s) (symbol-value s)))
-   :order-data    (when-let ((s (cacheus-symbols-order-ring-or-queue-var m-syms)))
-                    (when (boundp s) (symbol-value s)))
-   :frequency-ht  (when-let ((s (cacheus-symbols-frequency-var m-syms)))
-                    (when (boundp s) (symbol-value s)))
-   :entry-tags-ht (when-let ((s (cacheus-symbols-entry-tags-var m-syms)))
-                    (when (boundp s) (symbol-value s)))
-   :tags-idx-ht   (when-let ((s (cacheus-symbols-tags-idx-var m-syms)))
-                    (when (boundp s) (symbol-value s)))
-   :inflight-ht   (when-let ((s (cacheus-symbols-inflight-var m-syms)))
-                    (when (boundp s) (symbol-value s)))))
+- `INSTANCE` (cacheus-instance): The runtime instance of the cache.
+- `KEY-STR` (string|nil): The key to inspect, or nil to inspect all."
+  (cacheus-let*
+      (((&struct :options opts :symbols syms :runtime-data data) instance)
+       ((&struct :name name :version ver) opts)
+       ((&struct :cache-ht cache-ht :timestamps-ht ts-ht
+                 :entry-tags-ht et-ht) data)
+       ((&struct :version-id-var ver-var
+                 :key-accessor-for-entries key-acc
+                 :data-accessor-for-entries data-acc
+                 :ts-accessor-for-entries ts-acc
+                 :entry-ver-accessor-for-entries ver-acc) syms))
+    (if key-str
+        ;; --- Inspect a single entry ---
+        (condition-case-unless-debug e
+            (let* ((user-key (read key-str))
+                   (eff-key (if ver (list user-key ver) user-key))
+                   (entry (ht-get cache-ht eff-key)))
+              (if entry
+                  (message
+                   (format
+                    (concat "Cache '%S' Entry:\n"
+                            "  User Key: %S\n"
+                            "  Effective Key: %S\n"
+                            "  Version (Entry/Cache): %S / %S\n"
+                            "  Data: %S\n"
+                            "  Timestamp: %s\n"
+                            "  Age: ~a\n"
+                            "  Tags: %S")
+                    name user-key eff-key (funcall ver-acc entry) ver
+                    (funcall data-acc entry)
+                    (if-let ((ts (funcall ts-acc entry))) (ts-to-iso8601 ts) "N/A")
+                    (if-let ((rts (ht-get ts-ht eff-key))) (ts-diff (ts-now) rts)
+                      (if-let ((ts (funcall ts-acc entry)))
+                          (ts-diff (ts-now) ts) "N/A"))
+                    (ht-get et-ht eff-key "N/A")))
+                (message "No entry for key %S in cache %S." user-key name)))
+          (error (message "Error inspecting %S (key: %s): %S"
+                          name key-str e)))
+      ;; --- Inspect all entries ---
+      (with-output-to-temp-buffer (format "*Cacheus Inspection: %S*" name)
+        (princ (format "Cache: %S\nVersion: %S\nEntries: %d\n---\n"
+                       name
+                       (if (boundp ver-var) (symbol-value ver-var) "N/A")
+                       (ht-size cache-ht)))
+        (if (ht-empty? cache-ht)
+            (princ "Empty.\n")
+          (ht-map
+           cache-ht
+           (lambda (k v)
+             (princ
+              (format
+               (concat "Key: %S\n  Data: %S\n  TS: %s\n"
+                       "  Age: ~a\n  Tags: %S\n---\n")
+               (funcall key-acc v)
+               (funcall data-acc v)
+               (if-let ((ts (funcall ts-acc v))) (ts-to-iso8601 ts) "N/A")
+               (if-let ((rts (ht-get ts-ht k))) (ts-diff (ts-now) rts)
+                 (if-let ((ts (funcall ts-acc v)))
+                     (ts-diff (ts-now) ts) "N/A"))
+               (ht-get et-ht k "N/A"))))))))))
 
 (provide 'cacheus-util)
 ;;; cacheus-util.el ends here
