@@ -1,7 +1,5 @@
-;;; cacheus-storage.el --- Core cache entry storage and async operations
-;;; -*- lexical-binding: t; -*-
+;;; cacheus-storage.el --- Core cache entry storage and async operations. -*- lexical-binding: t; -*-
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Commentary:
 ;;
 ;; This file provides the fundamental functions for managing the storage of
@@ -10,7 +8,6 @@
 ;; asynchronous computations to prevent redundant work (the thundering herd
 ;; effect).
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Code:
 
 (require 'cl-lib)
@@ -23,136 +20,155 @@
 (require 'cacheus-eviction)
 (require 'cacheus-tags)
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; Entry Storage and Asynchronous Operations
+;; Ensure `concur:make-future` is available at compile-time for the macro.
+(eval-when-compile (require 'concur-future))
 
-(defun cacheus-store-result (entry-struct ekey tags instance logger)
-  "Store `entry-struct` in `instance` under effective key `ekey`.
-This is the primary write-path function. It orchestrates eviction
-logic before storing the new entry and updates tagging indexes if
-`tags` are provided.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Entry Storage and Asynchronous Operations (Package-Private)
+
+(defun cacheus-store-result (entry ekey tags instance logger)
+  "Store ENTRY in INSTANCE under effective key EKEY, with TAGS.
+
+This function is the primary entry point for adding a computed
+result to the cache. It orchestrates the process of making space
+for the new entry via eviction, storing the entry itself, and
+updating all associated metadata like timestamps and tags.
 
 Arguments:
-- `ENTRY-STRUCT` (struct): The fully formed entry struct to be stored.
-- `EKEY` (any): The effective cache key for this entry.
-- `TAGS` (list): A list of symbols to tag this entry with, or `nil`.
-- `INSTANCE` (cacheus-instance): The live instance to operate on.
-- `LOGGER` (function): A resolved logger function.
+  ENTRY (struct): The fully-formed cache entry struct to store.
+  EKEY (any): The effective cache key (which may include a version).
+  TAGS (list): A list of symbols to associate with this entry.
+  INSTANCE (cacheus-instance): The live cache instance.
+  LOGGER (function): The resolved logger function for this cache.
 
 Returns:
-The stored `ENTRY-STRUCT`."
+  The stored ENTRY struct."
   (let* ((opts (cacheus-instance-options instance))
-         (data (cacheus-instance-runtime-data instance))
+         (rtd (cacheus-instance-runtime-data instance))
          (name (cacheus-options-name opts))
-         (strategy (cacheus-options-eviction-strategy opts))
          (hook (cacheus-options-expiration-hook opts))
-         (cache-ht (cacheus-runtime-data-cache-ht data))
-         (ts-ht (cacheus-runtime-data-timestamps-ht data))
-         (et-ht (cacheus-runtime-data-entry-tags-ht data))
-         (tags-idx-ht (cacheus-runtime-data-tags-idx-ht data)))
-    (funcall logger :debug "[C:%S] store: Key:%S (Strategy:%S, Tags:%S)"
-             name ekey strategy tags)
+         (cache-ht (cacheus-runtime-data-cache-ht rtd)))
+    (funcall logger :debug "[C:%s] store: Key:%S (Tags:%S)" name ekey tags)
 
-    ;; Step 1: Evict an old entry if cache is at capacity.
+    ;; 1. Prepare for the new entry by running eviction logic if needed.
     (when-let ((victim-key (cacheus-eviction-prepare-for-put ekey instance)))
-      (funcall logger :debug "[C:%S] store: Victim %S chosen for eviction."
+      (funcall logger :debug "[C:%s] store: Victim %S chosen for eviction."
                name victim-key)
       (let ((evicted-struct (ht-get cache-ht victim-key)))
         (cacheus-evict-one-entry victim-key instance logger)
+        ;; Run user-defined hook for the expired/evicted entry.
         (when (and hook evicted-struct)
-          (condition-case-unless-debug e (funcall hook victim-key evicted-struct)
-            (error (funcall logger :error
-                            "[C:%S] Expired hook error for victim %S: %S"
-                            name victim-key e :trace))))))
+          (condition-case-unless-debug e
+              (funcall hook victim-key evicted-struct)
+            (error
+             (funcall logger :error "[C:%s] Expired hook error for %S: %S"
+                      name victim-key e :trace))))))
 
-    ;; Step 2: Store the new entry struct in the main cache hash table.
-    (ht-set! cache-ht ekey entry-struct)
-
-    ;; Step 3: Update external timestamp if using refresh-on-access TTL.
-    (when ts-ht (ht-set! ts-ht ekey (ts-now)))
-
-    ;; Step 4: Update tag indexes if tags are provided.
+    ;; 2. Store the new entry and its metadata.
+    (ht-set! cache-ht ekey entry)
+    (when-let ((ts-ht (cacheus-runtime-data-timestamps-ht rtd)))
+      (ht-set! ts-ht ekey (ts-now)))
     (cacheus-update-entry-tag-info ekey tags instance logger)
+    entry))
 
-    entry-struct))
+(defmacro cacheus-async-result (ekey producer-fn-form instance logger)
+  "Manage an asynchronous result production for EKEY.
 
-(defun cacheus-async-result (ekey producer-fn instance logger)
-  "Manage an asynchronous result production for `EKEY`.
-This prevents the thundering herd effect by tracking pending computations in
-the instance's `inflight-ht`. If a computation for `EKEY` is already
-running, its promise is returned. Otherwise, `PRODUCER-FN` is called to
-start a new computation, and its promise is tracked and returned.
+This macro prevents the 'thundering herd' problem for asynchronous
+caches. It uses a lazy `concur:future` to ensure that for a
+given key, the expensive `PRODUCER-FN-FORM` is only ever
+executed once, even if multiple callers request the key
+simultaneously while it is being computed. Subsequent callers
+receive the same promise for the in-flight computation.
 
 Arguments:
-- `EKEY` (any): The effective cache key for the operation.
-- `PRODUCER-FN` (function): A 0-arity function that must return a `concur` future.
-- `INSTANCE` (cacheus-instance): The live instance to operate on.
-- `LOGGER` (function): A resolved logger function.
+  EKEY (any): The effective cache key for the operation.
+  PRODUCER-FN-FORM (lambda-form): A 0-arity lambda `(lambda () ...)`
+    that computes the value and returns a `concur` promise.
+  INSTANCE (cacheus-instance): The live instance to operate on.
+  LOGGER (function): A resolved logger function.
 
 Returns:
-A `concur` promise that will resolve to the computed value."
-  (let* ((opts (cacheus-instance-options instance))
-         (syms (cacheus-instance-symbols instance))
-         (name (cacheus-options-name opts))
-         (inflight-var (cacheus-symbols-inflight-var syms))
-         (inflight-ht (and inflight-var (boundp inflight-var)
-                           (symbol-value inflight-var))))
-    ;; This `or` form is a "get or create" pattern for the promise.
-    (or (ht-get inflight-ht ekey)
-        ;; If not found, create and store a new promise.
-        (let ((promise (concur:force (funcall producer-fn))))
-          (unless (concur-promise-p promise)
-            (error "[C:%S] Producer for %S did not return a promise." name ekey))
-          (funcall logger :debug "[C:%S] async: Tracking new promise for %S."
-                   name ekey)
-          (ht-set! inflight-ht ekey promise)
-          ;; Attach handlers to clean up the `inflight-ht` automatically
-          ;; once the promise is settled (either resolved or rejected).
-          (concur:chain promise
-            (:finally (lambda ()
-                        (funcall logger :debug "[C:%S] async: Cleaning up promise for %S"
-                                 name ekey)
-                        (ht-remove! inflight-ht ekey))))
-          promise))))
+  (concur-promise) A promise that will resolve to the computed value."
+  (declare (indent 1))
+  ;; Use `gensym` to avoid variable capture conflicts inside the macro.
+  (let ((name (gensym "name-"))
+        (inflight-ht (gensym "inflight-ht-")))
+    `(let* ((,name (cacheus-options-name (cacheus-instance-options ,instance)))
+            (,inflight-ht (cacheus-runtime-data-inflight-ht
+                           (cacheus-instance-runtime-data ,instance))))
+       ;; 1. Check if a computation for this key is already in-flight.
+       (or (ht-get ,inflight-ht ,ekey)
+           ;; 2. If not, create a new computation promise.
+           (let* ((future (concur:make-future ,producer-fn-form))
+                  (promise (concur:force future)))
+             (unless (concur-promise-p promise)
+               (error "[C:%s] Producer for %S did not return a promise."
+                      ,name ,ekey))
+             (funcall ,logger :debug "[C:%s] async: Tracking new promise for %S."
+                      ,name ,ekey)
+             ;; 3. Store the promise so other callers can find it.
+             (ht-set! ,inflight-ht ,ekey promise)
+             ;; 4. Ensure the promise is removed from the in-flight tracker
+             ;;    once it resolves or fails.
+             (concur:finally
+              promise
+              (lambda ()
+                (funcall ,logger :debug "[C:%s] async: Cleaning up promise for %S"
+                         ,name ,ekey)
+                (ht-remove! ,inflight-ht ,ekey)))
+             promise)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; Runtime Functions
+;;; Runtime Functions (Package-Private)
 
 (defun cacheus-create-entry (instance key value)
   "Create a cache entry struct for INSTANCE with KEY and VALUE at runtime.
 
+This function dynamically constructs the appropriate entry struct
+for a given cache. It handles standard fields (key, data,
+timestamp) as well as any custom fields defined by the user via
+the `:fields` and `:meta-fn` options.
+
 Arguments:
-- `INSTANCE` (cacheus-instance): The live instance to operate on.
-- `KEY` (any): The cache key for the entry.
-- `VALUE` (any): The data value to be stored in the entry.
+  INSTANCE (cacheus-instance): The live cache instance.
+  KEY (any): The user-provided key for this entry.
+  VALUE (any): The computed value to be stored.
 
 Returns:
-A new cache entry struct instance."
-  (let* ((opts (cacheus-instance-options instance))
-         (syms (cacheus-instance-symbols instance))
-         (logger (cacheus-resolve-logger (cacheus-options-logger opts)))
-         (name (cacheus-options-name opts))
-         (meta-fn (cacheus-options-meta-fn opts))
-         (ctor-fn (symbol-function (cacheus-symbols-make-fn-constructor-for-entries syms)))
-         (ver-var (cacheus-symbols-version-id-var syms))
-         (custom-fields (-remove (lambda (f) (memq (car f) '(key data timestamp entry-version)))
-                                 (cacheus-symbols-all-struct-fields-for-entries syms)))
-         (meta-result (if meta-fn (funcall meta-fn key value)))
-         constructor-args)
-    (when (and meta-result (not (listp meta-result)))
-      (funcall logger :warn "[C:%S] :meta-fn returned non-plist: %S. Ignoring." name meta-result)
-      (setq meta-result nil))
-    (setq constructor-args
-          (list :key key ;; FIX: Ensure the key is stored in the entry.
+  (struct) A newly created cache entry struct."
+  (cacheus-let*
+      (((&struct :options opts :symbols syms) instance)
+       ((&struct :name name :logger lopt :meta-fn meta-fn) opts)
+       ((&struct :make-fn-constructor-for-entries ctor-fn
+                 :version-id-var ver-var
+                 :all-struct-fields-for-entries all-fields)
+        syms)
+       (logger (cacheus-resolve-logger lopt))
+       ;; Get field definitions, excluding the standard ones.
+       (custom-fields (-remove (lambda (f) (memq (car f)
+                                                 '(key data timestamp entry-version)))
+                               all-fields))
+       ;; Get user-provided metadata for this specific key-value pair.
+       (meta (if meta-fn (funcall meta-fn key value)))
+       (args nil))
+    ;; Validate that the metadata function returned a plist.
+    (when (and meta (not (listp meta)))
+      (funcall logger :warn "[C:%s] :meta-fn returned non-plist: %S. Ignoring."
+               name meta)
+      (setq meta nil))
+    ;; Construct the argument list for the entry struct's constructor.
+    (setq args
+          (list :key key
                 :data value
                 :timestamp (ts-now)
                 :entry-version (if (boundp ver-var) (symbol-value ver-var) nil)))
-    (dolist (field custom-fields)
-      (let* ((field-name (car field))
+    (dolist (field-def custom-fields)
+      (let* ((field-name (car field-def))
              (field-kw (intern (format ":%s" field-name))))
-        (setq constructor-args
-              (append constructor-args (list field-kw (plist-get meta-result field-name))))))
-    (apply ctor-fn constructor-args)))
+        (setq args (append args (list field-kw (plist-get meta field-name))))))
+    ;; Call the constructor with the dynamically built arguments.
+    (apply ctor-fn args)))
 
 (provide 'cacheus-storage)
 ;;; cacheus-storage.el ends here

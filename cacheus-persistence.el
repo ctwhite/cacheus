@@ -1,6 +1,5 @@
 ;;; cacheus-persistence.el --- Persistence and loading utilities for Cacheus -*- lexical-binding: t; -*-
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Commentary:
 ;;
 ;; This file provides the fundamental mechanisms for persisting Cacheus
@@ -8,7 +7,6 @@
 ;; integrity through atomic save operations and validates loaded cache files
 ;; against format and functional versions.
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Code:
 
 (require 'cl-lib)
@@ -26,254 +24,235 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Global Constants
 
-(defconst cacheus-file-format-version "cacheus-v1.0"
-  "Version string for the Cacheus file format.
-This ensures that breaking changes to the serialization format do not cause
-errors with older cache files.")
+(defconst cacheus--file-format-version "cacheus-v1.0"
+  "Version string for the Cacheus file format.")
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; High-Level Persistence API
+;;; High-Level Persistence API (Package-Private)
 
 (defun cacheus-persist-cache-instance (instance logger)
-  "Persist the state of a Cacheus `INSTANCE` to its configured cache file.
-This function serializes the cache's runtime data (entries, ordering,
-metadata) into a JSON string and saves it atomically.
+  "Persist the state of a Cacheus INSTANCE to its configured cache file.
+
+This function serializes the entire runtime state of a cache,
+including its metadata, all entries, and eviction-specific data,
+into a JSON format and saves it atomically to a file.
 
 Arguments:
-- `INSTANCE` (cacheus-instance): The live instance to persist.
-- `LOGGER` (function): The resolved logger function.
+  INSTANCE (cacheus-instance): The live cache instance to persist.
+  LOGGER (function): The resolved logger function for this cache.
 
 Returns:
-  (boolean): `t` on successful persistence, `nil` if skipped (e.g., no
-cache file is configured), or signals `cacheus-error` on failure."
+  t on success, nil on failure."
   (cacheus-let*
-      (((&struct :options opts :symbols syms :runtime-data data) instance)
-       ((&struct :name name :cache-file file :version ver
-                 :eviction-strategy evic-strat :capacity cap
-                 :ttl ttl :refresh-ttl refresh-ttl) opts)
-       ((&struct :version-id-var ver-var :size-var size-var
-                 :struct-name-for-entries s-name
-                 :all-struct-fields-for-entries all-fields) syms)
-       ((&struct :cache-ht cache-ht :timestamps-ht ts-ht :order-data order
-                 :frequency-ht freq-ht) data))
-    (cl-block cacheus-persist-cache-instance
-      (unless file
-        (funcall logger :warn "[C:%S] Persist: No :cache-file. Skipping." name)
-        (cl-return-from cacheus-persist-cache-instance nil))
+      (((&struct :options opts) instance)
+       ((&struct :name name :cache-file file) opts))
+    (unless file
+      (funcall logger :warn "[C:%s] Persist: No :cache-file configured." name)
+      (cl-return-from cacheus-persist-cache-instance nil))
 
-      (let ((data-to-persist (ht-create)))
-        ;; 1. Populate Metadata block.
-        (ht-set! data-to-persist 'metadata
-                 (ht ('fileFormatVersion cacheus-file-format-version)
-                     ('persistedAt (ts-to-iso8601 (ts-now)))
-                     ('cacheFunctionalVersion
-                      (or (and (boundp ver-var) (symbol-value ver-var)) ver "N/A"))
-                     ('evictionStrategy (symbol-name evic-strat))
-                     ('capacity (or (and (boundp size-var) (symbol-value size-var))
-                                   cap "N/A"))
-                     ('ttl (or ttl "N/A"))
-                     ('refreshTtlOnAccess (or refresh-ttl "N/A"))
-                     ('structName (symbol-name s-name))))
-
-        ;; 2. Populate Cache Entries.
-        (let ((entries-json-obj (ht-create)))
-          (ht-map cache-ht
-                  (lambda (key entry-struct)
-                    (when-let ((skey (cacheus-stringify-key key logger)))
-                      (let ((entry-detail (ht-create)))
-                        ;; Serialize all fields of the entry struct.
-                        (-each all-fields
-                               (lambda (field-spec)
-                                 (let* ((f-sym (car field-spec))
-                                        (acc-fn (intern (format "%s-%s" s-name f-sym)))
-                                        (val (funcall acc-fn entry-struct)))
-                                   (ht-set! entry-detail (symbol-name f-sym)
-                                            (if (ts-p val) (ts-to-iso8601 val) val)))))
-                        (when (and (eq evic-strat :lfu) freq-ht (ht-get freq-ht key))
-                          (ht-set! entry-detail "lfuFrequency" (ht-get freq-ht key)))
-                        (ht-set! entries-json-obj skey entry-detail)))))
-          (ht-set! data-to-persist 'entries entries-json-obj))
-
-        ;; 3. Populate Order Data (for LRU/FIFO).
-        (when order
-          (let ((order-keys (-filter #'identity
-                                     (-map #'cacheus-stringify-key
-                                           (ring-elements order)))))
-            (ht-set! data-to-persist 'order (vec order-keys))))
-
-        ;; 4. Encode to JSON and Save Atomically.
-        (condition-case-unless-debug err
-            (let ((json-string (json-encode data-to-persist '(:ht-style . alist))))
-              (cacheus-save-atomically file json-string logger)
-              (funcall logger :info "[C:%S] Persisted to %s." name file)
-              t)
-          (error (error "Persistence failed for %s: %S" file err)))))))
+    (let ((persist-data (ht-create)))
+      ;; 1. Serialize metadata.
+      (ht-set! persist-data "metadata" (cacheus--serialize-metadata instance))
+      ;; 2. Serialize all cache entries.
+      (ht-set! persist-data "entries" (cacheus--serialize-entries instance))
+      ;; 3. Serialize eviction order data if present.
+      (when-let ((order-data (cacheus-runtime-data-order-data
+                              (cacheus-instance-runtime-data instance))))
+        (ht-set! persist-data "order"
+                 (vec (-map (lambda (k) (cacheus-stringify-key k logger))
+                            (ring-elements order-data)))))
+      ;; 4. Atomically write JSON content to the file.
+      (condition-case-unless-debug err
+          (let ((json (json-encode persist-data)))
+            (cacheus-save-atomically file json logger)
+            (funcall logger :info "[C:%s] Persisted to %s." name file)
+            t)
+        (error (error "Persistence failed for %s: %S" file err))))))
 
 (defun cacheus-load-cache-instance (instance logger)
-  "Load the state of a Cacheus `INSTANCE` from its configured cache file.
-This function validates the cache file, clears the current runtime data,
-and then populates the instance by deserializing the JSON content.
+  "Load the state of a Cacheus INSTANCE from its configured cache file.
+
+This function reads a previously persisted JSON file, validates
+its format and version, and populates the provided live INSTANCE
+with the loaded data.
 
 Arguments:
-- `INSTANCE` (cacheus-instance): The live instance to load data into.
-- `LOGGER` (function): The resolved logger function.
+  INSTANCE (cacheus-instance): The live (but empty) cache instance.
+  LOGGER (function): The resolved logger function for this cache.
 
 Returns:
-  (boolean): `t` on successful loading, or `nil` if validation fails or an
-error occurs."
+  t on success, nil on failure."
   (cacheus-let*
-      (((&struct :options opts :symbols syms :runtime-data data) instance)
-       ((&struct :name name :cache-file file :version ver :capacity cap
-                 :eviction-strategy evic-strat) opts)
-       ((&struct :struct-name-for-entries s-name
-                 :make-fn-constructor-for-entries ctor
-                 :all-struct-fields-for-entries all-fields) syms)
-       ((&struct :cache-ht cache-ht :timestamps-ht ts-ht :order-data order
-                 :frequency-ht freq-ht) data)
+      (((&struct :options opts) instance)
+       ((&struct :name name :cache-file file :version ver) opts)
        (load-result (cacheus-load-and-validate-cache-file
-                     file cacheus-file-format-version ver logger)))
-
-    (cl-block cacheus-load-cache-instance
-      (unless (plist-get load-result :valid)
-        (funcall logger :warn "[C:%S] Load failed validation: %s. Starting fresh."
-                 name (plist-get load-result :reason))
-        (cl-return-from cacheus-load-cache-instance nil))
-
-      (condition-case-unless-debug err
-          (-let* (((&plist :raw-data raw-data) load-result)
-                  (metadata (cdr (assoc 'metadata raw-data)))
-                  (p-struct-str (cdr (assoc 'structName metadata)))
-                  (p-struct (when p-struct-str (intern-soft p-struct-str)))
-                  (entries-alist (cdr (assoc 'entries raw-data)))
-                  (s-order-vec (cdr (assoc 'order raw-data))))
-            (unless (eq p-struct s-name)
-              (error "Struct name mismatch. Expected %S, got %S in file."
-                     s-name (or p-struct "N/A")))
-            (cacheus-clear-runtime-data instance)
-
-            (-each entries-alist
-                   (lambda (entry-pair)
-                     (-let* (((skey . details) entry-pair)
-                             (key (cacheus-parse-key skey logger)))
-                       (when key
-                         (let* ((struct-args
-                                 (-mapcat
-                                  (lambda (f)
-                                    (let* ((f-sym (car f)) (f-str (symbol-name f-sym))
-                                           (val (cdr (assoc f-str details))))
-                                      (list (intern (concat ":" f-str))
-                                            (if (memq f-sym '(timestamp last-accessed))
-                                                (and (stringp val)
-                                                     (ignore-errors (ts-parse-iso8601 val)))
-                                              val))))
-                                  all-fields))
-                                (new-entry (apply ctor struct-args)))
-                           (ht-set! cache-ht key new-entry)
-                           (when ts-ht
-                             (when-let ((ts (funcall (intern (format "%s-timestamp" p-struct-str))
-                                                     new-entry)))
-                               (when (ts-p ts) (ht-set! ts-ht key ts))))
-                           (when (and (eq evic-strat :lfu) freq-ht)
-                             (when-let ((freq (cdr (assoc "lfuFrequency" details))))
-                               (ht-set! freq-ht key freq))))))))
-
-            (when (and order s-order-vec cap (> cap 0))
-              (let ((loaded-count 0))
-                (-each (if (vectorp s-order-vec) (cl-coerce s-order-vec 'list)
-                         s-order-vec)
-                       (lambda (skey)
-                         (when (< loaded-count cap)
-                           (when-let ((key (cacheus-parse-key skey logger)))
-                             (when (ht-get cache-ht key)
-                               (ring-insert order key)
-                               (cl-incf loaded-count))))))))
-            (funcall logger :info "[C:%S] Loaded %d entries from %s."
-                     name (ht-size cache-ht) file)
-            t)
-        (error
-         (funcall logger :error "load: Error populating from %s: %S"
-                  name file err :trace)
-         (funcall logger :warn "[C:%S] Cache starts fresh due to load error."
-                  name)
-         nil)))))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; Low-level Helpers
-
-(defun cacheus-save-atomically (file-path content logger)
-  "Atomically save string `CONTENT` to `FILE-PATH`.
-This uses a temporary file and rename operation to prevent data
-corruption if Emacs crashes or is killed during the save.
-
-Arguments:
-- `FILE-PATH` (string): The absolute path to the destination file.
-- `CONTENT` (string): The string content to save.
-- `LOGGER` (function): A resolved logger function.
-
-Returns:
-  (boolean): `t` on success, or signals `cacheus-error` on failure."
-  (condition-case-unless-debug err
-      (f-atomic-write-to-file file-path content)
-    (error
-     (funcall logger :error "atomic-save: Failed to write to %s: %S"
-              file-path err)
-     (signal 'cacheus-error (list "Atomic save failed" err)))))
-
-(defun cacheus-load-and-validate-cache-file (file-path expected-format-version
-                                             current-func-version logger)
-  "Load JSON data from `FILE-PATH` and perform basic validation.
-Validates file existence, JSON parsing, format version, and the cache's
-functional version against current values.
-
-Arguments:
-- `FILE-PATH` (string): The path to the cache file.
-- `EXPECTED-FORMAT-VERSION` (string): The expected file format version string.
-- `CURRENT-FUNC-VERSION` (any): The current functional version of the cache.
-- `LOGGER` (function): A resolved logger function.
-
-Returns:
-  (plist): A plist of the form `(:valid t/nil :reason string :raw-data alist)`."
-  (cl-block cacheus-load-and-validate-cache-file
-    (unless (file-exists-p file-path)
-      (funcall logger :warn "load: Cache file %s does not exist." file-path)
-      (cl-return-from cacheus-load-and-validate-cache-file
-        (list :valid nil :reason "File does not exist")))
+                     file cacheus--file-format-version ver logger)))
+    (unless (plist-get load-result :valid)
+      (funcall logger :warn "[C:%s] Load failed validation: %s. Starting fresh."
+               name (plist-get load-result :reason))
+      (cl-return-from cacheus-load-cache-instance nil))
 
     (condition-case-unless-debug err
-        (let* ((json-string (with-temp-buffer
-                              (insert-file-contents file-path)
-                              (buffer-string)))
-               (raw-data (json-read-from-string json-string))
-               (metadata (cdr (assoc 'metadata raw-data)))
-               (reason nil))
-          ;; --- Perform Validations ---
-          (unless metadata
-            (setq reason "Missing metadata block in cache file."))
-          (when-let ((file-ver (cdr (assoc 'fileFormatVersion metadata))))
-            (unless (equal file-ver expected-format-version)
-              (setq reason
-                    (format "File format mismatch. Expected %S, got %S"
-                            expected-format-version file-ver))))
-          (when current-func-version
-            (when-let ((persisted-ver (cdr (assoc 'cacheFunctionalVersion
-                                                  metadata))))
-              (unless (equal persisted-ver current-func-version)
-                (setq reason
-                      (format "Functional version mismatch. Expected %S, got %S"
-                              current-func-version persisted-ver)))))
-          ;; --- Return Result ---
-          (if reason
-              (progn
-                (funcall logger :warn "load: Invalid cache file %s: %s"
-                         file-path reason)
-                (list :valid nil :reason reason :raw-data raw-data))
-            (progn
-              (funcall logger :debug "load: Cache file %s validated." file-path)
-              (list :valid t :reason "OK" :raw-data raw-data))))
+        (-let* (((&plist :raw-data raw) load-result))
+          (cacheus--populate-instance-from-data instance raw logger)
+          (funcall logger :info "[C:%s] Loaded %d entries from %s."
+                   name (ht-size (cacheus-runtime-data-cache-ht
+                                  (cacheus-instance-runtime-data instance)))
+                   file)
+          t)
       (error
-       (funcall logger :error "load: Error reading/parsing %s: %S"
-                file-path err)
-       (list :valid nil :reason (format "Error reading file: %S" err))))))
+       (funcall logger :error "load: Error populating from %s: %S" name file err)
+       (funcall logger :warn "[C:%s] Cache starts fresh due to load error." name)
+       nil))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Low-level Helpers (Package-Private & File-Local)
+
+(defun cacheus--serialize-metadata (instance)
+  "File-local helper to serialize cache metadata to an alist."
+  (cacheus-let*
+      (((&struct :options opts :symbols syms) instance)
+       ((&struct :name name :version ver :eviction-strategy evic
+                 :capacity cap :ttl ttl :refresh-ttl refresh)
+        opts)
+       ((&struct :version-id-var ver-var :struct-name-for-entries s-name) syms))
+    `(("fileFormatVersion" . ,cacheus--file-format-version)
+      ("persistedAt" . ,(ts-format "%H:%M:%S" (ts-now)))
+      ("cacheFunctionalVersion" . ,(or (and (boundp ver-var) (symbol-value ver-var))
+                                       ver "N/A"))
+      ("evictionStrategy" . ,(symbol-name evic))
+      ("capacity" . ,(or cap "N/A"))
+      ("ttl" . ,(or ttl "N/A"))
+      ("refreshTtlOnAccess" . ,(or refresh "N/A"))
+      ("structName" . ,(symbol-name s-name)))))
+
+(defun cacheus--serialize-entries (instance)
+  "File-local helper to serialize cache entries to an alist."
+  (cacheus-let*
+      (((&struct :symbols syms :runtime-data rtd) instance)
+       ((&struct :cache-ht cache-ht :frequency-ht freq-ht) rtd)
+       ((&struct :struct-name-for-entries s-name
+                 :all-struct-fields-for-entries fields)
+        syms)
+       (logger (cacheus-resolve-logger
+                (cacheus-options-logger (cacheus-instance-options instance))))
+       (entries-alist nil))
+    (ht-map cache-ht
+            (lambda (key entry)
+              (when-let ((skey (cacheus-stringify-key key logger)))
+                (let ((details nil))
+                  (-each fields
+                         (lambda (spec)
+                           (let* ((fname (car spec))
+                                  (acc (intern (format "%s-%s" s-name fname)))
+                                  (val (funcall acc entry)))
+                             (push (cons (symbol-name fname)
+                                         (if (ts-p val) (ts-to-iso8601 val) val))
+                                   details))))
+                  (when (and freq-ht (ht-get freq-ht key))
+                    (push (cons "lfuFrequency" (ht-get freq-ht key)) details))
+                  (push (cons skey details) entries-alist)))))
+    entries-alist))
+
+(defun cacheus--populate-instance-from-data (instance raw-data logger)
+  "File-local helper to populate a cache instance from parsed JSON data."
+  (cacheus-let*
+      (((&struct :options opts :symbols syms :runtime-data rtd) instance)
+       ((&struct :capacity cap :eviction-strategy evic) opts)
+       ((&struct :struct-name-for-entries s-name
+                 :make-fn-constructor-for-entries ctor
+                 :all-struct-fields-for-entries fields)
+        syms)
+       ((&struct :cache-ht cache-ht :timestamps-ht ts-ht :order-data order
+                 :frequency-ht freq-ht)
+        rtd)
+       (meta (cdr (assoc "metadata" raw-data)))
+       (p-struct-str (cdr (assoc "structName" meta)))
+       (p-struct (and p-struct-str (intern-soft p-struct-str)))
+       (entries-alist (cdr (assoc "entries" raw-data)))
+       (s-order-list (cdr (assoc "order" raw-data))))
+    (unless (eq p-struct s-name)
+      (error "Struct mismatch. Expected %s, got %s" s-name p-struct))
+
+    (cacheus-clear-runtime-data instance)
+
+    (-each entries-alist
+           (lambda (pair)
+             (-let* (((skey . details) pair)
+                     (key (cacheus-parse-key skey logger)))
+               (when key
+                 (let* ((args (-mapcat
+                               (lambda (f)
+                                 (let* ((fsym (car f))
+                                        (fstr (symbol-name fsym))
+                                        (val (cdr (assoc fstr details))))
+                                   (list (intern (concat ":" fstr))
+                                         (if (memq fsym '(timestamp last-accessed))
+                                             (and (stringp val)
+                                                  (ignore-errors (ts-parse-iso8601 val)))
+                                           val))))
+                               fields))
+                        (entry (apply ctor args)))
+                   (ht-set! cache-ht key entry)
+                   (when-let ((ts-str (cdr (assoc "timestamp" details))))
+                     (when (and ts-ht (stringp ts-str))
+                       (when-let ((ts (ignore-errors (ts-parse-iso8601 ts-str))))
+                         (ht-set! ts-ht key ts))))
+                   (when (and (eq evic :lfu) freq-ht (cdr (assoc "lfuFrequency" details)))
+                     (ht-set! freq-ht key (cdr (assoc "lfuFrequency" details)))))))))
+
+    (when (and order s-order-list cap (> cap 0))
+      (let ((count 0))
+        (-each s-order-list
+               (lambda (skey)
+                 (when (< count cap)
+                   (when-let ((key (cacheus-parse-key skey logger)))
+                     (when (ht-get cache-ht key)
+                       (ring-insert order key)
+                       (cl-incf count))))))))))
+
+(defun cacheus-save-atomically (file-path content logger)
+  "Atomically save string CONTENT to FILE-PATH using native Emacs functions."
+  (condition-case-unless-debug err
+      (let* ((dir (file-name-directory file-path))
+             (temp-file (make-temp-file "cacheus-tmp" nil nil content)))
+        (make-directory dir t)
+        ;; Ensure temp file is in the same directory for POSIX atomicity guarantees
+        (let ((final-temp (expand-file-name (file-name-nondirectory temp-file) dir)))
+          (rename-file temp-file final-temp 'ok-if-already-exists)
+          (rename-file final-temp file-path 'ok-if-already-exists)))
+    (error
+     (funcall logger :error "atomic-save: Failed to write to %s: %S" file-path err)
+     (signal 'cacheus-error (list "Atomic save failed" err)))))
+
+(defun cacheus-load-and-validate-cache-file (file expected-fmt-ver current-fn-ver logger)
+  "Load JSON data from FILE and perform basic validation."
+  (unless (file-readable-p file)
+    (funcall logger :debug "load: Cache file %s does not exist." file)
+    (cl-return-from cacheus-load-and-validate-cache-file
+      (list :valid nil :reason "File does not exist")))
+  (condition-case-unless-debug err
+      (let* ((json-str (with-temp-buffer (insert-file-contents file) (buffer-string)))
+             (raw (json-read-from-string json-str))
+             (meta (cdr (assoc "metadata" raw)))
+             (reason nil))
+        (unless meta (setq reason "Missing metadata block in cache file."))
+        (when-let ((ver (cdr (assoc "fileFormatVersion" meta))))
+          (unless (equal ver expected-fmt-ver)
+            (setq reason (format "File format mismatch. Expected %s, got %s"
+                                 expected-fmt-ver ver))))
+        (when current-fn-ver
+          (when-let ((ver (cdr (assoc "cacheFunctionalVersion" meta))))
+            (unless (equal ver current-fn-ver)
+              (setq reason (format "Functional version mismatch. Expected %s, got %s"
+                                   current-fn-ver ver)))))
+        (if reason
+            (progn (funcall logger :warn "load: Invalid cache file %s: %s" file reason)
+                   (list :valid nil :reason reason :raw-data raw))
+          (progn (funcall logger :debug "load: Cache file %s validated." file)
+                 (list :valid t :reason "OK" :raw-data raw))))
+    (error (funcall logger :error "load: Error reading/parsing %s: %S" file err)
+           (list :valid nil :reason (format "Error reading file: %S" err)))))
 
 (provide 'cacheus-persistence)
 ;;; cacheus-persistence.el ends here

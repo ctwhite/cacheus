@@ -21,142 +21,139 @@
 (require 'cacheus-structs)
 (require 'cacheus-util)
 
-;; Declare external function to aid byte-compilation.
-(declare-function cacheus-evict-one-entry "cacheus-eviction"
-                  '(victim-key instance logger))
+;; This function is defined in `cacheus-eviction.el`, which is loaded before
+;; this file. This forward declaration prevents a byte-compiler warning.
+(declare-function cacheus-evict-one-entry "cacheus-eviction" (key instance logger))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; Tag Management
+;;; Tag Management (Package-Private)
 
 (defun cacheus-update-entry-tag-info (ekey tags instance logger)
-  "Update all tag indexes for `EKEY` with `TAGS`.
-This is called when an entry is stored. It ensures that the mapping from
-the entry key to its tags, and the reverse mapping from each tag to its
-keys, are both correctly updated.
+  "Update all tag indexes for EKEY with TAGS.
+
+This function maintains two data structures:
+1. `entry-tags-ht`: Maps an entry key to its list of tags.
+2. `tags-idx-ht`: An inverted index mapping a tag to a list of
+   keys that have that tag.
 
 Arguments:
-- `EKEY` (any): The effective key of the entry being updated.
-- `TAGS` (list): A list of symbols to associate with the entry.
-- `INSTANCE` (cacheus-instance): The live instance of the cache.
-- `LOGGER` (function): The resolved logger function.
+  EKEY (any): The effective key of the entry being tagged.
+  TAGS (list): A list of tag symbols.
+  INSTANCE (cacheus-instance): The live cache instance.
+  LOGGER (function): The resolved logger function.
 
-Returns:
-  nil."
+Returns: None."
   (cacheus-let*
       (((&struct :runtime-data data) instance)
        ((&struct :entry-tags-ht et-ht :tags-idx-ht tags-idx-ht) data))
     (when (and tags et-ht tags-idx-ht)
       (let ((unique-tags (-distinct tags :test #'equal)))
         (when unique-tags
-          ;; Associate the key with its tags.
           (ht-set! et-ht ekey unique-tags)
-          ;; Update the reverse index (tag -> list of keys).
           (-each unique-tags
                  (lambda (tag)
-                   (cl-pushnew ekey (ht-get tags-idx-ht tag) :test #'equal))))))))
+                   ;; Get the list of keys for this tag, add the new key,
+                   ;; and set it back.
+                   (let ((keys (ht-get tags-idx-ht tag)))
+                     (cl-pushnew ekey keys :test #'equal)
+                     (ht-set! tags-idx-ht tag keys)))))))))
 
 (defun cacheus-remove-entry-tag-info (ekey instance logger)
-  "Remove all tag information for `EKEY` from the instance's tag indexes.
-This is a critical cleanup operation called during entry eviction to ensure
-the tag system remains consistent. It operates by:
-1. Finding all tags for `EKEY` in `entry-tags-ht`.
-2. For each tag, removing `EKEY` from the key list in `tags-idx-ht`.
-3. Removing `EKEY` itself from `entry-tags-ht`.
+  "Remove all tag information for EKEY from the instance's tag indexes.
+
+This is called during eviction to ensure the tag indexes remain
+consistent.
 
 Arguments:
-- `EKEY` (any): The effective key of the entry being removed.
-- `INSTANCE` (cacheus-instance): The live instance to operate on.
-- `LOGGER` (function): A resolved logger function.
+  EKEY (any): The effective key of the entry being evicted.
+  INSTANCE (cacheus-instance): The live cache instance.
+  LOGGER (function): The resolved logger function.
 
-Returns:
-  nil."
+Returns: None."
   (cacheus-let*
       (((&struct :options opts :runtime-data data) instance)
        ((&struct :name name) opts)
        ((&struct :entry-tags-ht et-ht :tags-idx-ht tags-idx-ht) data))
-    ;; Only proceed if both tagging hash tables exist.
     (when (and et-ht tags-idx-ht)
       (when-let ((tags (ht-get et-ht ekey)))
-        ;; For each tag this entry has...
+        ;; For each tag the entry had, remove the entry's key
+        ;; from the inverted index.
         (-each tags
                (lambda (tag)
-                 ;; ...remove this key from the tag's reverse index.
                  (when-let* ((keys (ht-get tags-idx-ht tag))
-                             (updated-keys (-remove ekey keys :test #'equal)))
-                   (if (null updated-keys)
+                             (updated (-remove ekey keys :test #'equal)))
+                   ;; If no more keys have this tag, remove the tag itself.
+                   (if (null updated)
                        (ht-remove! tags-idx-ht tag)
-                     (ht-set! tags-idx-ht tag updated-keys))))))
-        ;; Finally, remove the key -> tags mapping itself.
+                     (ht-set! tags-idx-ht tag updated))))))
+        ;; Finally, remove the key -> tags mapping.
         (ht-remove! et-ht ekey)
-        (funcall logger :debug "[C:%S] Removed tags for %S" name ekey))))
+        (funcall logger :debug "[C:%s] Removed tags for %S" name ekey))))
 
-;;;###autoload
+(defun cacheus-get-keys-by-tags (tags-idx-ht tags all-must-match)
+  "Return a list of keys matching TAGS based on matching strategy."
+  (if all-must-match
+      ;; Intersect the key lists for all specified tags.
+      (when-let ((initial-keys (ht-get tags-idx-ht (car tags))))
+        (-reduce (lambda (acc tag)
+                   (if (null acc)
+                       acc
+                     (cl-intersection acc (ht-get tags-idx-ht tag))))
+                 (cdr tags)
+                 initial-keys))
+    ;; Union the key lists for all specified tags.
+    (let ((keys-ht (ht-create)))
+      (dolist (tag tags)
+        (dolist (k (ht-get tags-idx-ht tag))
+          (ht-set! keys-ht k t)))
+      (ht-keys keys-ht))))
+
 (cl-defun cacheus-invalidate-keys-by-tags
-    (runtime-instance tags &key (all-must-match nil) (run-hooks t))
-  "Find and evict cache entries based on a list of `TAGS`.
-This is the core implementation for tag-based invalidation.
+    (instance tags &key (all-must-match nil) (run-hooks t))
+  "Find and evict cache entries based on a list of TAGS.
 
 Arguments:
-- `RUNTIME-INSTANCE` (cacheus-instance): The live instance object.
-- `TAGS` (list|symbol): A single tag symbol or a list of symbols.
-- `:all-must-match` (boolean): If non-nil, evicts entries that have ALL
-  specified tags (AND logic). If nil (default), evicts entries that
-  have ANY of the specified tags (OR logic).
-- `:run-hooks` (boolean): If non-nil, runs the cache's `:expiration-hook`
-  for each entry evicted by this operation.
+  INSTANCE (cacheus-instance): The live cache instance.
+  TAGS (list): A list of tag symbols to match.
+  ALL-MUST-MATCH (boolean): If non-nil, an entry must have all
+    tags to be invalidated. If nil, any entry with at least one
+    of the tags will be invalidated.
+  RUN-HOOKS (boolean): If non-nil, run the `:expiration-hook` for
+    each invalidated entry.
 
 Returns:
-  (list): A list of the keys that were invalidated."
-  (cl-block cacheus-invalidate-keys-by-tags
-    (cacheus-let*
-        (((&struct :options opts :runtime-data data) runtime-instance)
-         ((&struct :name name :logger logger-opt :expiration-hook hook) opts)
-         ((&struct :cache-ht cache-ht :tags-idx-ht tags-idx-ht) data)
-         (logger (cacheus-resolve-logger logger-opt))
-         (tags-to-match (if (listp tags) tags (list tags)))
-         (keys-to-invalidate '()))
+  (list) A list of keys that were invalidated."
+  (cacheus-let*
+      (((&struct :options opts :runtime-data data) instance)
+       ((&struct :name name :logger lopt :cache-expiration-hook hook) opts)
+       ((&struct :cache-ht cache-ht :tags-idx-ht tags-idx-ht) data)
+       (logger (cacheus-resolve-logger lopt))
+       (tags-to-match (if (listp tags) tags (list tags)))
+       (keys nil))
+    (unless (seq-every-p #'symbolp tags-to-match)
+      (error "Tags must be symbols or a list of symbols. Got: %S" tags))
+    (when (null tags-to-match)
+      (funcall logger :warn "[C:%s] No tags provided for invalidation." name)
+      (cl-return-from cacheus-invalidate-keys-by-tags nil))
 
-      (unless (seq-every-p #'symbolp tags-to-match)
-        (error "Tags must be symbols or a list of symbols. Got: %S"
-               tags-to-match))
-      (when (null tags-to-match)
-        (funcall logger :warn "[C:%S] No tags provided for invalidation." name)
-        (cl-return-from cacheus-invalidate-keys-by-tags nil))
+    (setq keys (cacheus-get-keys-by-tags tags-idx-ht tags-to-match all-must-match))
 
-      ;; Step 1: Determine which keys to invalidate based on matching strategy.
-      (if all-must-match
-          ;; AND logic: find the intersection of keys for all provided tags.
-          (when-let ((initial-keys (ht-get tags-idx-ht (car tags-to-match))))
-            (setq keys-to-invalidate
-                  (-reduce (lambda (acc tag)
-                             (if (null acc)
-                                 (cl-return-from cacheus-invalidate-keys-by-tags nil)
-                               (cl-intersection acc (ht-get tags-idx-ht tag))))
-                           (cdr tags-to-match)
-                           initial-keys)))
-        ;; OR logic: find the union of keys for all provided tags.
-        (dolist (tag tags-to-match)
-          (dolist (k (ht-get tags-idx-ht tag))
-            (cl-pushnew k keys-to-invalidate :test #'equal))))
-      (setq keys-to-invalidate (-distinct keys-to-invalidate :test #'equal))
-
-      ;; Step 2: Evict all the identified keys.
-      (if keys-to-invalidate
-          (progn
-            (funcall logger :info "[C:%S] Invalidating %d entries for tags %S"
-                     name (length keys-to-invalidate) tags-to-match)
-            (-each keys-to-invalidate
-                   (lambda (key)
-                     (let ((entry (ht-get cache-ht key)))
-                       (cacheus-evict-one-entry key runtime-instance logger)
-                       (when (and run-hooks hook entry)
-                         (condition-case-unless-debug e (funcall hook key entry)
-                           (error (funcall logger :error
-                                           "[C:%S] Hook error for key %S: %S"
-                                           name key e :trace))))))))
-        (funcall logger :info "[C:%S] No entries found for tags %S"
-                 name tags-to-match))
-      keys-to-invalidate)))
+    (if keys
+        (progn
+          (funcall logger :info "[C:%s] Invalidating %d entries for tags %S"
+                   name (length keys) tags-to-match)
+          (-each keys
+                 (lambda (key)
+                   (let ((entry (ht-get cache-ht key)))
+                     (cacheus-evict-one-entry key instance logger)
+                     (when (and run-hooks hook entry)
+                       (condition-case-unless-debug e
+                           (funcall hook key entry)
+                         (error
+                          (funcall logger :error "[C:%s] Hook error for key %S: %S"
+                                   name key e :trace))))))))
+      (funcall logger :info "[C:%s] No entries found for tags %S" name tags-to-match))
+    keys))
 
 (provide 'cacheus-tags)
 ;;; cacheus-tags.el ends here
