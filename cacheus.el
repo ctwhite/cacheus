@@ -27,21 +27,21 @@
 ;;
 ;; Core Entry Points:
 ;;
-;; - `cacheus-cache!`: A macro to define a generic, key-value cache with a full
+;; - `cacheus:cache!`: A macro to define a generic, key-value cache with a full
 ;;   suite of helper functions for direct interaction.
 ;;
-;; - `cacheus-memoize!`: A macro to transparently add caching to an Emacs Lisp
+;; - `cacheus:memoize!`: A macro to transparently add caching to an Emacs Lisp
 ;;   function at compile-time.
 ;;
-;; - `cacheus-memoize-fn`: A function to wrap an *existing* function with
+;; - `cacheus:memoize-fn`: A function to wrap an *existing* function with
 ;;   caching logic at runtime, returning a new memoized function.
 ;;
-;; - `cacheus-get!` and `cacheus-put!`: Unified macros for directly getting or
-;;   setting values in any cache, whether created by `cacheus-cache!` or
-;;   `cacheus-memoize!`.
+;; - `cacheus:get!` and `cacheus:put!`: Unified macros for directly getting or
+;;   setting values in any cache, whether created by `cacheus:cache!` or
+;;   `cacheus:memoize!`.
 ;;
-;; - Global Management: Interactive commands like `cacheus-list-all-caches`
-;;   and `cacheus-clear-all-caches` to manage all defined caches at once.
+;; - Global Management: Interactive commands like `cacheus:list-all-caches`
+;;   and `cacheus:clear-all-caches` to manage all defined caches at once.
 ;;
 ;; This main entry point loads all necessary components of the framework.
 
@@ -51,10 +51,10 @@
 ;; and the backend generation engine.
 (require 'cacheus-core)
 
-;; Provides the `cacheus-cache!` macro for creating generic caches.
+;; Provides the `cacheus:cache!` macro for creating generic caches.
 (require 'cacheus-cache)
 
-;; Provides the `cacheus-memoize!`, `cacheus-memoize-fn`, and
+;; Provides the `cacheus:memoize!`, `cacheus:memoize-fn`, and
 ;; `cacheus-macro-memoize!` features.
 (require 'cacheus-memoize)
 

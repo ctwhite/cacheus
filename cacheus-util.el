@@ -1,13 +1,12 @@
-;;; cacheus-util.el --- Core utilities for the Cacheus framework -*- lexical-binding: t; -*-
+;;; cacheus-util.el --- Core utilities for the Cacheus framework -*-
+;;; lexical-binding: t; -*-
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Commentary:
 ;;
 ;; This file is the home for fundamental utility functions and macros that are
 ;; used across the Cacheus caching framework. It centralizes common operations
 ;; to promote code reuse, consistency, and a clean architecture.
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Code:
 
 (require 'cl-lib)
@@ -20,57 +19,51 @@
 
 (require 'cacheus-structs)
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Logging Utilities (Package-Private)
 
 (defun cacheus-resolve-logger (logger-opt)
   "Resolve `LOGGER-OPT` to a callable logger function.
-Handles `t`, `nil`, a function, or a hook symbol."
+Handles `t` for `message`, `nil` for no-op, a function symbol,
+or a direct function.
+
+Arguments:
+- `LOGGER-OPT` (any): The option value to resolve.
+
+Returns:
+  (function) A function that can be called with log arguments."
   (cond
    ((eq logger-opt t) #'message)
    ((null logger-opt) (lambda (&rest _args) nil))
    ((functionp logger-opt) logger-opt)
    ((symbolp logger-opt)
-    (cond
-     ((fboundp logger-opt) (symbol-function logger-opt))
-     ((boundp logger-opt)
-      (lambda (level fmt &rest args)
-        (apply #'run-hook-with-args logger-opt level fmt args)))
-     (t (lambda (&rest _args) nil))))
+    (if (fboundp logger-opt)
+        (symbol-function logger-opt)
+      (lambda (&rest _args) nil)))
    (t (lambda (&rest _args) nil))))
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Key Serialization Utilities (Package-Private)
 
 (defun cacheus-stringify-key (key logger)
-  "Convert an arbitrary Elisp `KEY` into a JSON-compatible string."
-  (condition-case-unless-debug err
+  "Convert an arbitrary Elisp `KEY` into a string for serialization."
+  (condition-case err
       (cl-typecase key
         (string key)
         (symbol (symbol-name key))
         (number (number-to-string key))
         (t (prin1-to-string key)))
-    (error
-     (funcall logger :error "stringify-key: Failed for key %S: %S" key err)
-     nil)))
+    (error (funcall logger :error "stringify-key: Failed for key %S: %S" key err)
+           nil)))
 
 (defun cacheus-parse-key (skey logger)
   "Parse a stringified key `SKEY` back into its original Elisp form."
-  (condition-case-unless-debug err
-      (read skey)
-    (error
-     (funcall logger :error "parse-key: Failed for string '%s': %S" skey err)
-     nil)))
+  (condition-case err (read skey)
+    (error (funcall logger :error "parse-key: Failed for string '%s': %S" skey err)
+           nil)))
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Argument and Struct Utilities (Package-Private)
-
-(defun cacheus-plist-valid-p (plist)
-  "Return `t` if `PLIST` is a well-formed property list."
-  (or (null plist)
-      (and (zerop (% (length plist) 2))
-           (cl-loop for i from 0 below (length plist) by 2
-                    always (keywordp (nth i plist))))))
 
 (defun cacheus-validate-fn-option (value option-name)
   "Validate that VALUE is suitable for an option that expects a function."
@@ -82,28 +75,12 @@ Handles `t`, `nil`, a function, or a hook symbol."
     (error "cacheus: %S option must be function, lambda, or symbol, got %S"
            option-name value)))
 
-(defun cacheus-resolve-option-value (option-value &optional key)
-  "Resolve a cache option's value.
-If the option is a function, it is called. If it is a variable
-symbol, its value is returned. Otherwise, the value is returned as-is."
-  (cond
-   ((functionp option-value)
-    (condition-case err
-        (funcall option-value key)
-      (wrong-number-of-arguments
-       (funcall option-value))))
-   ((and (symbolp option-value) (boundp option-value))
-    (symbol-value option-value))
-   (t option-value)))
-
 (defmacro cacheus-let* (bindings &rest body)
   "A destructuring `let*` that supports `&struct` for `cl-defstruct`.
-
 This macro extends `let*` with a special `&struct` keyword to
 easily destructure Cacheus structs without needing to know their
-exact type (e.g., `cacheus-instance` vs.
-`cacheus-memoize-instance`) at compile time. It dynamically
-builds the correct accessor function names at runtime.
+exact type at compile time. It dynamically builds the correct
+accessor function names at runtime.
 
 Example:
   (cacheus-let* (((&struct :options opts :symbols syms) instance))
@@ -128,20 +105,18 @@ Example:
                 (unless (keywordp slot-key)
                   (error "Struct slot key must be a keyword: %S" slot-key))
                 (push `(,var-name
-                        (let ((accessor (intern (format "%s-%s"
-                                                        (type-of ,g-struct)
-                                                        ,acc-name-str))))
-                          (if (fboundp accessor)
-                              (funcall accessor ,g-struct)
-                            (error "Invalid accessor %S for struct of type %S"
-                                   accessor (type-of ,g-struct)))))
+                        (let ((acc (intern (format "%s-%s" (type-of ,g-struct)
+                                                   ,acc-name-str))))
+                          (if (fboundp acc) (funcall acc ,g-struct)
+                            (error "Invalid accessor %S for struct type %S"
+                                   acc (type-of ,g-struct)))))
                       final-forms))))
         ;; This is a regular let* binding.
         (push binding final-forms)))
     `(-let* ,(nreverse final-forms)
        ,@body)))
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Inspection Dispatcher (Package-Private)
 
 (defun cacheus-inspect-instance-dispatch (instance key-str)
@@ -151,43 +126,45 @@ Example:
     (cacheus--inspect-all-entries instance)))
 
 (defun cacheus--inspect-single-entry (instance key-str)
-  "File-local helper to inspect a single cache entry by KEY-STR."
-  (cacheus-let*
-      (((&struct :options opts :runtime-data rtd) instance)
-       ((&struct :name name :version ver) opts)
-       ((&struct :cache-ht cache-ht) rtd))
-    (condition-case-unless-debug e
+  "Helper to inspect a single cache entry by KEY-STR."
+  (let* ((opts (cacheus-instance-options instance))
+         (rtd (cacheus-instance-runtime-data instance))
+         (name (cacheus-options-name opts))
+         (ver (cacheus-options-version opts))
+         (cache-ht (cacheus-runtime-data-cache-ht rtd)))
+    (condition-case e
         (let* ((user-key (read key-str))
                (eff-key (if ver (list user-key ver) user-key))
-               (entry (ht-get cache-ht eff-key)))
+               (entry (gethash eff-key cache-ht)))
           (if entry
-              (message "%s" (cacheus--format-entry-for-inspection name ver entry eff-key rtd))
+              (message "%s" (cacheus--format-entry-for-inspection
+                             name ver entry eff-key rtd))
             (message "No entry for key %S in cache %S." user-key name)))
       (error (message "Error inspecting %s (key: %s): %S" name key-str e)))))
 
 (defun cacheus--inspect-all-entries (instance)
-  "File-local helper to inspect all entries in a cache."
-  (cacheus-let*
-      (((&struct :options opts :symbols syms :runtime-data rtd) instance)
-       ((&struct :name name) opts)
-       ((&struct :version-id-var ver-var) syms)
-       ((&struct :cache-ht cache-ht) rtd))
+  "Helper to inspect all entries in a cache."
+  (let* ((opts (cacheus-instance-options instance))
+         (syms (cacheus-instance-symbols instance))
+         (rtd (cacheus-instance-runtime-data instance))
+         (name (cacheus-options-name opts))
+         (ver-var (cacheus-symbols-version-id-var syms))
+         (cache-ht (cacheus-runtime-data-cache-ht rtd)))
     (with-output-to-temp-buffer (format "*Cacheus Inspection: %s*" name)
       (princ (format "Cache: %s\nVersion: %S\nEntries: %d\n---\n"
-                     name
-                     (if (boundp ver-var) (symbol-value ver-var) "N/A")
-                     (ht-size cache-ht)))
-      (if (ht-empty? cache-ht)
+                     name (if (boundp ver-var) (symbol-value ver-var) "N/A")
+                     (hash-table-count cache-ht)))
+      (if (hash-table-empty-p cache-ht)
           (princ "Empty.\n")
-        (ht-map cache-ht
-                (lambda (k v)
-                  (princ (cacheus--format-entry-for-inspection name nil v k rtd))
-                  (princ "\n---\n")))))))
+        (maphash (lambda (k v)
+                   (princ (cacheus--format-entry-for-inspection name nil v k rtd))
+                   (princ "\n---\n"))
+                 cache-ht)))))
 
 (defun cacheus--format-entry-for-inspection (name ver entry eff-key rtd)
-  "File-local helper to format a single entry for display."
-  (cacheus-let*
-      (((&struct :cache-ht cache-ht :timestamps-ht ts-ht :entry-tags-ht et-ht) rtd))
+  "Helper to format a single entry for display."
+  (let ((ts-ht (cacheus-runtime-data-timestamps-ht rtd))
+        (et-ht (cacheus-runtime-data-entry-tags-ht rtd)))
     (format
      (concat "Cache '%s' Entry:\n"
              "  User Key: %S\n"
@@ -198,14 +175,14 @@ Example:
              "  Age (sec): %s\n"
              "  Tags: %S")
      name
-     (cacheus-entry-field name entry 'key)
+     (cacheus:entry-field name entry 'key)
      eff-key
-     (cacheus-entry-version name entry)
+     (cacheus:entry-version name entry)
      ver
-     (cacheus-entry-data name entry)
-     (if-let ((ts (cacheus-entry-timestamp name entry))) (ts-to-iso8601 ts) "N/A")
-     (if-let ((ts (ht-get ts-ht eff-key))) (ts-diff (ts-now) ts) "N/A")
-     (ht-get et-ht eff-key "None"))))
+     (cacheus:entry-data name entry)
+     (if-let ((ts (cacheus:entry-timestamp name entry))) (ts-to-iso8601 ts) "N/A")
+     (if-let ((ts (gethash eff-key ts-ht))) (ts-diff (ts-now) ts) "N/A")
+     (gethash eff-key et-ht "None"))))
 
 (provide 'cacheus-util)
 ;;; cacheus-util.el ends here

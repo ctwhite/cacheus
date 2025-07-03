@@ -1,12 +1,16 @@
-;;; cacheus-core.el --- Core Cacheus Library and Global Management -*- lexical-binding: t; -*-
+;;; cacheus-core.el --- Core Cacheus Library and Global Management -*-
+;;; lexical-binding: t; -*-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Commentary:
 ;;
 ;; `cacheus-core.el` serves as the foundational library for the entire Cacheus
 ;; ecosystem. It defines the global cache registry, the high-level management
-;; functions, and the primary user-facing macros (`cacheus-get!`,
-;; `cacheus-put!`, etc.) that are shared by all other `cacheus-` modules.
+;; functions, and the primary user-facing macros (`cacheus:get!`,
+;; `cacheus:put!`, etc.) that are shared by all other `cacheus-` modules.
+;;
+;; It orchestrates the metaprogramming defined in `cacheus-generators.el` and
+;; manages the lifecycle of all defined caches.
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Code:
@@ -39,53 +43,48 @@
   :group 'cacheus)
 
 (defvar cacheus-global-cache-registry (make-hash-table :test 'eq)
-  "Global registry of all Cacheus caches defined by various modules.
+  "Global registry of all Cacheus caches defined by `defcacheus`.
 This hash table maps a cache's name (a symbol) to a plist
-containing its configuration (`cacheus-options` struct), its symbols
-(`cacheus-symbols` struct), and a template `cacheus-instance` struct.")
+containing its configuration, generated symbols, and a template instance.")
 
-(define-error 'cacheus-error
-  "Generic Cacheus error. All specific Cacheus errors inherit from this." nil)
+(define-error 'cacheus-error "Generic Cacheus error." nil)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Core Generation Logic (Package-Private)
 
 (defun cacheus-create-options (name-sym options-plist)
   "Create and validate a `cacheus-options` struct from a plist.
-
 This is an internal setup function called by `defcacheus` to
-process the user-provided options.
+process the user-provided options at compile-time.
 
 Arguments:
-  NAME-SYM (symbol): The name of the cache being created.
-  OPTIONS-PLIST (plist): The plist of options from the macro body.
+- `NAME-SYM` (symbol): The name of the cache being created.
+- `OPTIONS-PLIST` (plist): The plist of options from the macro body.
 
 Returns:
   (cacheus-options) A validated options struct."
-  (cacheus-let* (((&plist :ttl ttl
-                         :version ver
-                         :capacity cap
-                         :eviction-strategy evic
-                         :cache-file file
-                         :refresh-ttl refresh-ttl
-                         :logger logger
-                         :cache-expiration-hook exp-hook
-                         :periodic-cleanup periodic
-                         :predicate pred
-                         :error-handler err-handler
-                         :async async
-                         :dirty-p dirty-p
-                         :clear-hook clear-hook
-                         :prefix prefix
-                         :fields fields
-                         :meta-fn meta-fn
-                         :tags-fn tags-fn)
-                 options-plist)
-                 (final-evic (if (memq evic '(:lru :lfu :fifo :none nil)) evic :lru)))
+  (let* ((ttl (plist-get options-plist :ttl))
+         (ver (plist-get options-plist :version))
+         (cap (plist-get options-plist :capacity))
+         (evic (plist-get options-plist :eviction-strategy))
+         (file (plist-get options-plist :cache-file))
+         (refresh-ttl (plist-get options-plist :refresh-ttl))
+         (logger (plist-get options-plist :logger))
+         (exp-hook (plist-get options-plist :expiration-hook))
+         (periodic (plist-get options-plist :periodic-cleanup))
+         (pred (plist-get options-plist :predicate))
+         (err-handler (plist-get options-plist :error-handler))
+         (async (plist-get options-plist :async))
+         (dirty-p (plist-get options-plist :dirty-p))
+         (clear-hook (plist-get options-plist :clear-hook))
+         (prefix (plist-get options-plist :prefix))
+         (fields (plist-get options-plist :fields))
+         (meta-fn (plist-get options-plist :meta-fn))
+         (tags-fn (plist-get options-plist :tags-fn))
+         (final-evic (if (memq evic '(:lru :lfu :fifo :none nil)) evic :lru)))
     (when (and evic (not (eq evic final-evic)))
-      (warn "cacheus: Invalid :eviction-strategy %S. Using :lru." evic))
-    (cacheus-validate-fn-option pred :predicate)
-    (cacheus-validate-fn-option err-handler :error-handler)
+      (warn "cacheus: Invalid :eviction-strategy %S for %s. Using :lru."
+            evic name-sym))
     (make-cacheus-options
      :name name-sym :logger logger :capacity cap :eviction-strategy final-evic
      :cache-file file :version ver :periodic-cleanup periodic
@@ -95,61 +94,52 @@ Returns:
      :fields-data fields :meta-fn meta-fn :tags-fn tags-fn)))
 
 (defun cacheus--generate-symbol-plist (sym-prefix)
-  "Generate a plist of cache-related symbols based on a prefix.
-This is a file-local helper for `cacheus-generate-symbols`."
-  (let* ((specs '((:cache-var           "-ht")
+  "Generate a plist of cache-related symbols based on a prefix."
+  (let ((specs '((:cache-var           "-ht")
                   (:timestamps-var      "-timestamps-ht")
-                  (:order-ring-or-queue-var "-order-queue")
-                  (:size-var            "-capacity-var")
+                  (:order-var           "-order-queue")
                   (:frequency-var       "-frequency-ht")
                   (:version-id-var      "-version-id")
                   (:save-fn             "-save")
                   (:clear-fn            "-clear")
-                  (:inspect-cache-fn    "-inspect")
-                  (:inspect-entry-fn    "-inspect-entry")
+                  (:inspect-fn          "-inspect")
                   (:entry-tags-var      "-entry-tags-ht")
                   (:tags-idx-var        "-tags-idx-ht")
                   (:invalidate-tags-fn  "-invalidate-by-tags")
                   (:load-fn             "-load")
-                  (:inflight-var        "-inflight-ht")))
-         (plist (cl-loop for (key suffix) in specs
-                         collect key and collect
-                         (intern (format "%s%s" sym-prefix suffix)))))
-    (append plist nil)))
+                  (:inflight-var        "-inflight-ht"))))
+    (cl-loop for (key suffix) in specs
+             collect key and collect (intern (format "%s%s" sym-prefix suffix)))))
 
 (defun cacheus-generate-symbols (options-struct)
   "Generate and return a `cacheus-symbols` struct based on options.
-
 This function performs the metaprogramming step of creating all
 the necessary symbol names for a new cache's functions, variables,
 and struct accessors.
 
 Arguments:
-  OPTIONS-STRUCT (cacheus-options): The configuration for the new cache.
+- `OPTIONS-STRUCT` (cacheus-options): The configuration for the new cache.
 
 Returns:
   (cacheus-symbols) A struct containing all generated symbols."
-  (cacheus-let* (((&struct :name name :prefix prefix :fields-data fields)
-                 options-struct)
-                 (sym-prefix (format "%s--%s" prefix (symbol-name name)))
-                 (s-name (intern (format "%s-entry" sym-prefix)))
-                 (ctor (intern (format "make-%s" s-name)))
-                 (key-acc (intern (format "%s-key" s-name)))
-                 (ts-acc (intern (format "%s-timestamp" s-name)))
-                 (data-acc (intern (format "%s-data" s-name)))
-                 (ver-acc (intern (format "%s-entry-version" s-name)))
-                 (unique-fields (cl-remove-duplicates fields :key #'car :test #'eq))
-                 (all-fields `((key nil :read-only t)
-                               (data nil :read-only t)
-                               (timestamp nil :type (or ts null))
-                               (entry-version nil :read-only t)
-                               ,@unique-fields)))
+  (let* ((name (cacheus-options-name options-struct))
+         (prefix (cacheus-options-prefix options-struct))
+         (fields (cacheus-options-fields-data options-struct))
+         (sym-prefix (format "%s--%s" prefix (symbol-name name)))
+         (s-name (intern (format "%s-entry" sym-prefix)))
+         (ctor (intern (format "make-%s" s-name)))
+         (key-acc (intern (format "%s-key" s-name)))
+         (ts-acc (intern (format "%s-timestamp" s-name)))
+         (data-acc (intern (format "%s-data" s-name)))
+         (ver-acc (intern (format "%s-entry-version" s-name)))
+         (all-fields `((key nil :read-only t) (data nil :read-only t)
+                       (timestamp nil :type (or ts null))
+                       (entry-version nil :read-only t)
+                       ,@(cl-remove-duplicates fields :key #'car))))
     (apply #'make-cacheus-symbols
-           :sym-prefix sym-prefix
-           :struct-name-for-entries s-name
+           :sym-prefix sym-prefix :struct-name-for-entries s-name
            :make-fn-constructor-for-entries ctor
-           :key-accessor-for-entries key-acc
-           :ts-accessor-for-entries ts-acc
+           :key-accessor-for-entries key-acc :ts-accessor-for-entries ts-acc
            :data-accessor-for-entries data-acc
            :entry-ver-accessor-for-entries ver-acc
            :all-struct-fields-for-entries all-fields
@@ -160,33 +150,33 @@ Returns:
 
 (defun cacheus--initialize-runtime-data (instance)
   "Create and attach a new `cacheus-runtime-data` struct to an INSTANCE.
-This file-local helper performs the lazy initialization of a cache's
-live data structures (hash tables, ring buffers, etc.)."
-  (cacheus-let* (((&struct :options opts) instance)
-                 ((&struct :capacity cap :eviction-strategy evic) opts)
-                 (rtd (make-cacheus-runtime-data
-                       :cache-ht (make-hash-table :test 'equal)
-                       :timestamps-ht (make-hash-table :test 'equal)
-                       :entry-tags-ht (make-hash-table :test 'equal)
-                       :tags-idx-ht (make-hash-table :test 'eq)
-                       :inflight-ht (make-hash-table :test 'equal)
-                       :order-data (when (and cap (memq evic '(:lru :fifo)))
-                                     (ring-init cap))
-                       :frequency-ht (when (and cap (eq evic :lfu))
-                                       (make-hash-table :test 'equal)))))
+This performs lazy initialization of a cache's live data structures."
+  (let* ((opts (cacheus-instance-options instance))
+         (cap (cacheus-options-capacity opts))
+         (evic (cacheus-options-eviction-strategy opts))
+         (rtd (make-cacheus-runtime-data
+               :cache-ht (make-hash-table :test 'equal)
+               :timestamps-ht (make-hash-table :test 'equal)
+               :entry-tags-ht (make-hash-table :test 'equal)
+               :tags-idx-ht (make-hash-table :test 'eq)
+               :inflight-ht (make-hash-table :test 'equal)
+               :order-data (when (and cap (memq evic '(:lru :fifo)))
+                             (ring-init cap))
+               :frequency-ht (when (and cap (eq evic :lfu))
+                               (make-hash-table :test 'equal)))))
     (setf (cacheus-instance-runtime-data instance) rtd)))
 
 (defun cacheus-get-instance-by-name (cache-name)
   "Find, lazily initialize, and return the live instance for CACHE-NAME.
-
-This is a critical package-private function. It retrieves the cache
-definition from the global registry. If the cache has not been used
-yet in the current session, its runtime data (e.g., hash tables)
-will be `nil`. In this case, this function creates those data
-structures and attaches them to a live copy of the instance.
+This is a critical function that implements lazy initialization. When a cache
+is defined, a 'template' instance is stored in a `defvar`. The first time that
+cache is accessed via this function, the template is copied, and its runtime
+data structures (hash tables, etc.) are created. This live instance then
+replaces the template in the `defvar` for all subsequent uses in the session.
+This avoids allocating memory for all caches at startup.
 
 Arguments:
-  CACHE-NAME (symbol): The name of the cache to retrieve.
+- `CACHE-NAME` (symbol): The name of the cache to retrieve.
 
 Returns:
   (cacheus-instance) The live, initialized cache instance struct."
@@ -196,72 +186,72 @@ Returns:
       (error "Cacheus: No instance variable for cache '%s'" cache-name))
     (let ((instance (symbol-value ivar)))
       (unless (cacheus-instance-runtime-data instance)
-        ;; The instance is a template. Make a live copy and initialize it.
-        (let ((live-instance (copy-sequence instance)))
+        (let ((live-instance (copy-structure instance)))
           (cacheus--initialize-runtime-data live-instance)
-          ;; Replace the template with the live instance for this session.
-          (setf (symbol-value ivar) live-instance)
+          (set ivar live-instance)
           (setq instance live-instance)))
       instance)))
 
 (defun cacheus--handle-hit (entry key instance)
   "Handle a cache hit for ENTRY. Returns the value."
-  (cacheus-let* (((&struct :options opts :symbols syms) instance)
-                 ((&struct :name name :logger logger-opt) opts)
-                 ((&struct :data-accessor-for-entries data-acc) syms)
-                 (logger (cacheus-resolve-logger logger-opt))
-                 (val (funcall data-acc entry)))
-    (funcall logger :debug "[C:%s] CACHE HIT" name)
+  (let* ((opts (cacheus-instance-options instance))
+         (syms (cacheus-instance-symbols instance))
+         (name (cacheus-options-name opts))
+         (logger (cacheus-resolve-logger (cacheus-options-logger opts)))
+         (data-acc (cacheus-symbols-data-accessor-for-entries syms))
+         (val (funcall data-acc entry)))
+    (funcall logger :debug "[C:%s] CACHE HIT for key: %S" name key)
     (cacheus-update-instance-on-hit key instance)
     val))
 
 (defun cacheus--handle-miss-sync (instance key compute-thunk user-key)
   "Handle a synchronous cache miss by computing and storing the value."
-  (cacheus-let* (((&struct :options opts) instance)
-                 ((&struct :name name :logger lopt :predicate p :tags-fn tfn
-                           :error-handler eh) opts)
-                 (logger (cacheus-resolve-logger lopt))
-                 (val nil))
-    (funcall logger :debug "[C:%s] SYNC MISS for key: %S. Computing." name user-key)
-    (condition-case-unless-debug err
-        (setq val (funcall compute-thunk))
+  (let* ((opts (cacheus-instance-options instance))
+         (logger (cacheus-resolve-logger (cacheus-options-logger opts)))
+         val)
+    (funcall logger :debug "[C:%s] SYNC MISS for key: %S"
+             (cacheus-options-name opts) user-key)
+    (condition-case err (setq val (funcall compute-thunk))
       (error
        (funcall logger :error "[C:%s] Sync compute error for %S: %S"
-                name user-key err :trace)
-       (when eh (funcall eh err))
+                (cacheus-options-name opts) user-key err)
+       (when-let (eh (cacheus-options-error-handler opts)) (funcall eh err))
        nil))
-    (if (and val (or (null p) (funcall p val)))
-        (let* ((tags (if tfn (funcall tfn user-key val)))
+    (if (and val (or (null (cacheus-options-predicate opts))
+                     (funcall (cacheus-options-predicate opts) val)))
+        (let* ((tags (when-let (tfn (cacheus-options-tags-fn opts))
+                       (funcall tfn user-key val)))
                (entry (cacheus-create-entry instance key val)))
           (cacheus-store-result entry key tags instance logger))
-      (funcall logger :debug "[C:%s] Sync predicate rejected: %S" name user-key))
+      (funcall logger :debug "[C:%s] Sync predicate rejected value for key: %S"
+               (cacheus-options-name opts) user-key))
     val))
 
 (defun cacheus--handle-miss-async (instance key compute-thunk user-key)
   "Handle an asynchronous cache miss, returning a promise."
-  (require 'concur)
-  (cacheus-let* (((&struct :options opts) instance)
-                 ((&struct :name name :logger lopt :error-handler eh
-                           :predicate p :tags-fn tfn) opts)
-                 (logger (cacheus-resolve-logger lopt)))
-    (funcall logger :debug "[C:%s] ASYNC MISS for key: %S. Computing." name user-key)
+  (require 'concur-chain)
+  (let* ((opts (cacheus-instance-options instance))
+         (logger (cacheus-resolve-logger (cacheus-options-logger opts))))
+    (funcall logger :debug "[C:%s] ASYNC MISS for key: %S"
+             (cacheus-options-name opts) user-key)
     (let ((promise (cacheus-async-result key compute-thunk instance logger)))
       (concur:chain promise
         (:then (lambda (val)
-                 (if (and p (not (funcall p val)))
-                     (progn
-                       (funcall logger :debug "[C:%s] Async predicate rejected" name)
-                       (concur:rejected! (list :predicate-rejected val)))
+                 (if (and-let ((p (cacheus-options-predicate opts)))
+                       (not (funcall p val)))
+                     (progn (funcall logger :debug "[C:%s] Async predicate rejected"
+                                     (cacheus-options-name opts))
+                            (concur:rejected! (list :predicate-rejected val)))
                    val)))
         (:then (lambda (val)
-                 (let* ((tags (if tfn (funcall tfn user-key val)))
+                 (let* ((tags (when-let (tfn (cacheus-options-tags-fn opts))
+                                (funcall tfn user-key val)))
                         (entry (cacheus-create-entry instance key val)))
                    (cacheus-store-result entry key tags instance logger)
                    val)))
         (:catch (lambda (reason)
-                  (funcall logger :error "[C:%s] Async compute error for %S: %S"
-                           name user-key reason :trace)
-                  (when eh (funcall eh reason))
+                  (when-let (eh (cacheus-options-error-handler opts))
+                    (funcall eh reason))
                   (cacheus-evict-one-entry key instance logger)
                   (concur:rejected! reason)))))))
 
@@ -276,105 +266,98 @@ Returns:
          (opts (cacheus-instance-options live-instance))
          (rtd (cacheus-instance-runtime-data live-instance))
          (logger (cacheus-resolve-logger (cacheus-options-logger opts)))
-         (cache-ht (cacheus-runtime-data-cache-ht rtd))
-         (entry (gethash key cache-ht))
+         (entry (gethash key (cacheus-runtime-data-cache-ht rtd)))
          (final-user-key (or user-key key)))
     (if (and entry (not (cacheus-is-entry-stale key entry live-instance logger)))
         (let ((val (cacheus--handle-hit entry key live-instance)))
-          (if async
-              (progn (require 'concur)
-                     (if (concur-promise-p val) val (concur:resolved! val)))
-            val))
-      (progn
-        (when entry
-          (funcall logger :debug "[C:%s] STALE HIT for key: %S. Evicting."
-                   (cacheus-options-name opts) final-user-key)
-          (cacheus-evict-one-entry key live-instance logger))
-        (if async
-            (cacheus--handle-miss-async live-instance key compute-thunk final-user-key)
-          (cacheus--handle-miss-sync live-instance key compute-thunk final-user-key))))))
+          (if async (concur:resolved! val) val))
+      (when entry
+        (funcall logger :debug "[C:%s] STALE HIT for key: %S"
+                 (cacheus-options-name opts) final-user-key)
+        (cacheus-evict-one-entry key live-instance logger))
+      (if async
+          (cacheus--handle-miss-async live-instance key compute-thunk
+                                      final-user-key)
+        (cacheus--handle-miss-sync live-instance key compute-thunk
+                                   final-user-key)))))
 
 (cl-defun cacheus-put (cache-name key value &key tags)
   "Manually insert or update a VALUE for a given KEY in a cache."
   (let ((instance (cacheus-get-instance-by-name cache-name)))
-    (cacheus-let* (((&struct :options opts) instance)
-                   (p (cacheus-options-predicate opts))
-                   (logger (cacheus-resolve-logger (cacheus-options-logger opts)))
-                   (final-key key))
-      (when (eq (type-of instance) 'cacheus-memoize-instance)
-        (let* ((key-fn (or (cacheus-memoize-options-key-fn opts) #'list))
-               (ver (cacheus-options-version opts))
-               (comp-key (apply key-fn key)))
-          (setq final-key (if ver (list comp-key ver) comp-key))))
+    (let* ((opts (cacheus-instance-options instance))
+           (p (cacheus-options-predicate opts))
+           (logger (cacheus-resolve-logger (cacheus-options-logger opts))))
       (if (and p (not (funcall p value)))
-          (progn
-            (funcall logger :info "[C:%s] Put: Skipped key %S (predicate)"
-                     cache-name final-key)
-            nil)
-        (let ((entry (cacheus-create-entry instance final-key value)))
+          (progn (funcall logger :info "[C:%s] Put: Skipped key %S (predicate)"
+                          cache-name key) nil)
+        (let ((entry (cacheus-create-entry instance key value)))
           (funcall logger :info "[C:%s] Put: Storing new value for key %S"
-                   cache-name final-key)
-          (cacheus-store-result entry final-key tags instance logger)
+                   cache-name key)
+          (cacheus-store-result entry key tags instance logger)
           value)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Universal Cache API - Macros (Public)
 
 ;;;###autoload
-(defmacro cacheus-get! (cache-name-form &rest args)
+(defmacro cacheus:get! (cache-name-form &rest args)
   "Retrieve a value from a cache, or compute it if missing.
+This is the primary macro for interacting with Cacheus. It dispatches to
+the correct underlying function based on whether the target cache is a
+simple cache (taking a key and a thunk) or a memoized function (taking
+arguments).
 
-This is the primary macro for interacting with Cacheus. It
-dispatches to the correct underlying function based on whether the
-target cache is a simple cache or a memoized function.
+For a standard cache defined with `defcacheus`, the macro takes two arguments:
+the key and a form to compute the value on a cache miss.
+
+  (cacheus:get! 'my-cache \"some-key\"
+    (lambda () (long-computation)))
+
+For a memoized function defined with `defcacheus-memo`, you simply call it
+like the original function.
+
+  (my-memoized-function arg1 arg2) ; `cacheus:get!` is expanded by the memo macro.
 
 Arguments:
-  CACHE-NAME-FORM (symbol | form): The name of the cache, or a form
-    that evaluates to the cache name symbol.
-  ARGS...: For a memoized function, the arguments to that function.
-    For a standard cache, this should be two forms: the KEY and a
-    COMPUTE-THUNK (a zero-argument lambda that computes the value).
+- `CACHE-NAME-FORM` (symbol | form): The name of the cache, or a form that
+  evaluates to the cache name symbol.
+- `ARGS...`:
+  - For a standard cache: A KEY and a COMPUTE-THUNK `(lambda () ...)`.
+  - For a memoized function: The arguments to that function.
 
 Returns:
-  The cached value, the newly computed value, or a promise if the
-  cache is asynchronous."
+  The cached value, the newly computed value, or a `concur-promise` for the
+  value if the cache is asynchronous."
   (declare (indent 1))
-  ;; The entire body of this backquote is the macro expansion. It generates
-  ;; code that will run when the user's code is executed.
   `(let* ((cache-name ,cache-name-form)
           (registry-entry (gethash cache-name cacheus-global-cache-registry)))
      (unless registry-entry
-       (error "cacheus-get!: No cache registered for %S" cache-name))
-     ;; This `pcase` runs at runtime, inside the expanded code.
+       (error "cacheus:get!: No cache registered for %S" cache-name))
      (pcase (plist-get registry-entry :type)
        ('memoize
         ;; For a memoized function, expand to a direct function call.
-        ;; The function's name is the same as the cache's name.
         (apply cache-name (list ,@args)))
        ('cache
         (let* ((key ,(car args))
                (compute-thunk ,(cadr args))
                (instance-var (plist-get registry-entry :instance-var-sym)))
-          ;; For a standard cache, expand to a call to the universal helper.
-          ;; This is the location of the fix. This form is now executed
-          ;; rather than being returned as a quoted list.
-          (cacheus-get-or-compute
-           (symbol-value instance-var)
-           key
-           (or compute-thunk (lambda () nil))
-           :user-key key)))
-       (type (error "cacheus-get!: Unknown cache type '%s'" type)))))
+          (cacheus-get-or-compute (symbol-value instance-var)
+                                  key (or compute-thunk (lambda () nil))
+                                  :user-key key)))
+       (type (error "cacheus:get!: Unknown cache type '%s'" type)))))
 
 ;;;###autoload
-(defmacro cacheus-put! (cache-name-form key value &rest kwargs)
+(defmacro cacheus:put! (cache-name-form key value &rest kwargs)
   "Manually insert or update a VALUE for a given KEY in a cache.
+This is useful for pre-populating a cache or for situations where
+the value is computed outside of a `cacheus:get!` call.
 
 Arguments:
-  CACHE-NAME-FORM (symbol | form): The name of the cache, or a form
-    that evaluates to the cache name symbol.
-  KEY: The key to associate with the value.
-  VALUE: The value to store in the cache.
-  KWARGS... (plist): Optional keyword arguments, such as `:tags`.
+- `CACHE-NAME-FORM` (symbol | form): The name of the cache.
+- `KEY`: The key to associate with the value.
+- `VALUE`: The value to store in the cache.
+- `KWARGS...` (plist): Optional keyword arguments, such as `:tags`.
+  - `:tags` (list): A list of symbols to tag this cache entry with.
 
 Returns:
   The stored VALUE, or nil if the cache's predicate rejected it."
@@ -382,55 +365,51 @@ Returns:
   `(cacheus-put ,cache-name-form ,key ,value ,@kwargs))
 
 ;;;###autoload
-(defmacro cacheus-clear! (cache-name-form)
+(defmacro cacheus:clear! (cache-name-form)
   "Clear all entries from a specific Cacheus cache by its name.
+This invokes the dynamically generated `clear` function for the cache.
 
 Arguments:
-  CACHE-NAME-FORM (symbol | form): The name of the cache, or a form
-    that evaluates to the cache name symbol.
+- `CACHE-NAME-FORM` (symbol | form): The name of the cache.
 
 Returns:
-  t if the clear function was called, otherwise signals an error."
+  `t` if the clear function was called, otherwise signals an error."
   (declare (indent 1))
   `(let* ((cache-name ,cache-name-form)
-          (registry-entry (gethash cache-name cacheus-global-cache-registry))
-          (clear-fn-sym (and registry-entry
-                             (plist-get registry-entry :clear-fn-symbol))))
-     (if (and clear-fn-sym (fboundp clear-fn-sym))
-         (funcall clear-fn-sym)
-       (error "cacheus-clear!: No clear function for cache '%S'" cache-name))))
+          (reg (gethash cache-name cacheus-global-cache-registry))
+          (clear-fn (and reg (plist-get reg :clear-fn-symbol))))
+     (if (and clear-fn (fboundp clear-fn))
+         (funcall clear-fn)
+       (error "cacheus:clear!: No clear function for cache '%S'" cache-name))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Global Cache Management (Public, Interactive)
 
 ;;;###autoload
-(defun cacheus-list-all-caches ()
-  "Display all registered Cacheus caches in a tabulated list.
-
+(defun cacheus:list-all-caches ()
+  "Display all registered Cacheus caches in a `tabulated-list` buffer.
+This provides a dashboard for observing and managing all defined caches.
 From the list buffer, you can perform actions on a cache:
   i: Inspect the cache's contents.
   c: Clear the cache.
   s: Save the cache to its file (if applicable).
 
-Arguments: None.
-Returns: None."
+Arguments:
+  None.
+
+Returns:
+  None. This function's purpose is its side effect of displaying a buffer."
   (interactive)
   (let ((buffer (get-buffer-create "*Cacheus Caches*")))
     (with-current-buffer buffer
       (let ((inhibit-read-only nil)) (erase-buffer))
       (setq-local tabulated-list-format
-                  [("Cache Name" 30 t)
-                   ("Type" 10 t)
-                   ("Entries" 10 :right-align)
-                   ("Capacity" 10 :right-align)
-                   ("TTL (s)" 8 :right-align)
+                  [("Cache Name" 30 t) ("Type" 10 t) ("Entries" 10 :right-align)
+                   ("Capacity" 10 :right-align) ("TTL (s)" 8 :right-align)
                    ("File" 35 t)])
       (setq-local tabulated-list-entries
-                  (--map #'cacheus--cache-details-to-list-entry
-                        (let ((vals nil))
-                          (maphash (lambda (k v) (push v vals))
-                                   cacheus-global-cache-registry)
-                          vals)))
+                  (mapcar #'cacheus--cache-details-to-list-entry
+                          (hash-table-values cacheus-global-cache-registry)))
       (tabulated-list-mode)
       (define-key tabulated-list-mode-map "i" #'cacheus--list-caches-inspect)
       (define-key tabulated-list-mode-map "c" #'cacheus--list-caches-clear)
@@ -440,32 +419,33 @@ Returns: None."
     (display-buffer buffer)))
 
 (defun cacheus--cache-details-to-list-entry (details)
-  "File-local helper to format cache details for `tabulated-list-mode`."
-  (cacheus-let* (((&plist :name name :type type :config opts :instance-var-sym ivar)
-                 details)
-                 ((&struct :capacity cap :ttl ttl :cache-file file) opts)
-                 (instance (and (boundp ivar) (symbol-value ivar)))
-                 (rtd (and instance (cacheus-instance-runtime-data instance)))
-                 (size (if-let ((ht (and rtd (cacheus-runtime-data-cache-ht rtd))))
-                           (hash-table-count ht) "N/A")))
-    (list name (vector (format "%s" name)
-                       (format "%s" type)
-                       (format "%s" size)
-                       (format "%s" (or cap "None"))
-                       (format "%s" (or ttl "None"))
+  "Helper to format cache details for `tabulated-list-mode`."
+  (let* ((name (plist-get details :name))
+         (type (plist-get details :type))
+         (opts (plist-get details :config))
+         (ivar (plist-get details :instance-var-sym))
+         (cap (cacheus-options-capacity opts))
+         (ttl (cacheus-options-ttl opts))
+         (file (cacheus-options-cache-file opts))
+         (instance (and (boundp ivar) (symbol-value ivar)))
+         (rtd (and instance (cacheus-instance-runtime-data instance)))
+         (size (if-let (ht (and rtd (cacheus-runtime-data-cache-ht rtd)))
+                   (hash-table-count ht) "N/A")))
+    (list name (vector (format "%s" name) (format "%s" type) (format "%s" size)
+                       (format "%s" (or cap "Inf"))
+                       (format "%s" (or ttl "Inf"))
                        (format "%s" (or file "None"))))))
 
 (defun cacheus--list-caches-operate (op-name op-fn-sym)
-  "File-local helper to run an operation from the tabulated list."
+  "Helper to run an operation from the tabulated list."
   (let* ((name (tabulated-list-get-id))
-         (registry-entry (gethash name cacheus-global-cache-registry))
-         (fn-sym (plist-get registry-entry op-fn-sym)))
+         (reg (gethash name cacheus-global-cache-registry))
+         (fn-sym (plist-get reg op-fn-sym)))
     (if (and fn-sym (fboundp fn-sym))
-        (progn
-          (funcall fn-sym)
-          (message "Cacheus: Ran '%s' on '%s'." op-name name)
-          (revert-buffer))
-      (message "Cacheus: No '%s' function for cache '%s'." op-name name))))
+        (progn (funcall fn-sym)
+               (message "Cacheus: Ran '%s' on '%s'" op-name name)
+               (revert-buffer))
+      (message "Cacheus: No '%s' function for cache '%s'" op-name name))))
 
 (defun cacheus--list-caches-inspect () "Interactive helper." (interactive)
   (cacheus--list-caches-operate "inspect" :inspect-fn-symbol))
@@ -476,160 +456,164 @@ Returns: None."
 
 (defun cacheus--operate-on-all-caches (op-name op-fn-sym &optional name-filter)
   "Internal helper to perform an op on all or filtered registered caches."
-  (let* ((logger (cacheus-resolve-logger nil))
-         (count 0)
-         (all-details (let (vals)
-                        (maphash (lambda (k v) (push v vals))
-                                 cacheus-global-cache-registry)
-                        vals))
-         (caches (--filter (lambda (d)
-                             (or (not name-filter) (string-empty-p name-filter)
-                                 (string-match-p
-                                  name-filter
-                                  (symbol-name (plist-get d :name)))))
-                           all-details)))
+  (let* ((logger (cacheus-resolve-logger nil)) (count 0)
+         (caches (--filter
+                  (or (not name-filter)
+                      (string-match-p name-filter
+                                      (symbol-name (plist-get it :name))))
+                  (hash-table-values cacheus-global-cache-registry))))
     (if (null caches)
-        (message "No caches found%s to %s."
+        (message "No caches found%s to %s"
                  (if name-filter (format " matching '%s'" name-filter) "") op-name)
       (-each caches
              (lambda (details)
                (let* ((name (plist-get details :name))
                       (fn-sym (plist-get details op-fn-sym)))
                  (if (and fn-sym (fboundp fn-sym))
-                     (progn
-                       (funcall logger :info "Cacheus: %s-all: %s..." op-name name)
-                       (condition-case-unless-debug e (funcall fn-sym)
-                         (error
-                          (funcall logger :error "Cacheus: Failed to %s %s: %S"
-                                   op-name name e)))
-                       (cl-incf count))
-                   (funcall logger :warn "Cacheus: %s-all: Skipping %s (no valid fn)."
-                            op-name name))))))
-    (message "Attempted to %s %d cache(s)%s."
-             op-name count (if name-filter (format " matching '%s'" name-filter) ""))))
+                     (progn (funcall logger :info "Cacheus: %s-all: %s..."
+                                     op-name name)
+                            (condition-case e (funcall fn-sym)
+                              (error (funcall logger :error
+                                              "Cacheus: Failed %s %s: %S"
+                                              op-name name e)))
+                            (cl-incf count))
+                   (funcall logger :warn "Cacheus: %s-all: Skipping %s (no fn)"
+                            op-name name)))))
+      (message "Attempted to %s %d cache(s)%s." op-name count
+               (if name-filter (format " matching '%s'" name-filter) "")))))
 
 ;;;###autoload
-(defun cacheus-clear-all-caches (&optional name-filter)
+(defun cacheus:clear-all-caches (&optional name-filter)
   "Clear all registered caches, with an optional regexp filter.
 
 Arguments:
-  NAME-FILTER (string or prefix-arg): If called interactively with a
-    prefix argument, prompts for a regexp to filter cache names.
-    If called programmatically, a string regexp.
+- `NAME-FILTER` (string or prefix-arg, optional): If called interactively with a
+  prefix argument, prompts for a regexp to filter cache names. If provided as a
+  string, it's used as a regexp directly.
 
-Returns: None."
+Returns:
+  None. This function's purpose is its side effect of clearing caches."
   (interactive "P")
   (cacheus--operate-on-all-caches
    "clear" :clear-fn-symbol
-   (if (consp name-filter) (read-string "Filter by cache name (regexp): ") name-filter)))
+   (if (consp name-filter)
+       (read-string "Filter by cache name (regexp): ") name-filter)))
 
 ;;;###autoload
-(defun cacheus-save-all-caches (&optional name-filter)
+(defun cacheus:save-all-caches (&optional name-filter)
   "Save all registered, file-backed caches.
 
 Arguments:
-  NAME-FILTER (string or prefix-arg): If called interactively with a
-    prefix argument, prompts for a regexp to filter cache names.
+- `NAME-FILTER` (string or prefix-arg, optional): If called interactively with a
+  prefix argument, prompts for a regexp to filter cache names. If provided as a
+  string, it's used as a regexp directly.
 
-Returns: None."
+Returns:
+  None. This function's purpose is its side effect of saving caches."
   (interactive "P")
   (cacheus--operate-on-all-caches
    "save" :save-fn-symbol
-   (if (consp name-filter) (read-string "Filter by cache name (regexp): ") name-filter)))
+   (if (consp name-filter)
+       (read-string "Filter by cache name (regexp): ") name-filter)))
 
 ;;;###autoload
-(defun cacheus-load-all-caches (&optional name-filter)
+(defun cacheus:load-all-caches (&optional name-filter)
   "Load all registered, file-backed caches.
 
 Arguments:
-  NAME-FILTER (string or prefix-arg): If called interactively with a
-    prefix argument, prompts for a regexp to filter cache names.
+- `NAME-FILTER` (string or prefix-arg, optional): If called interactively with a
+  prefix argument, prompts for a regexp to filter cache names. If provided as a
+  string, it's used as a regexp directly.
 
-Returns: None."
+Returns:
+  None. This function's purpose is its side effect of loading caches."
   (interactive "P")
   (cacheus--operate-on-all-caches
    "load" :load-fn-symbol
-   (if (consp name-filter) (read-string "Filter by cache name (regexp): ") name-filter)))
+   (if (consp name-filter)
+       (read-string "Filter by cache name (regexp): ") name-filter)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Public Entry Data Accessors
 
 (defun cacheus--get-cache-symbols (cache-name)
-  "File-local helper to retrieve the symbols struct for a given cache-name."
-  (unless (symbolp cache-name) (error "Cache name must be a symbol, got %S" cache-name))
+  "Helper to retrieve the symbols struct for a given cache-name."
+  (unless (symbolp cache-name)
+    (error "Cache name must be a symbol: %S" cache-name))
   (let* ((reg (gethash cache-name cacheus-global-cache-registry))
          (syms (and reg (plist-get reg :symbols-struct))))
-    (unless syms (error "No cache registered with name '%s'." cache-name))
+    (unless syms (error "No cache registered with name '%s'" cache-name))
     syms))
 
 ;;;###autoload
-(defun cacheus-entry-data (cache-name entry)
-  "Retrieve data from a cache ENTRY struct for CACHE-NAME.
+(defun cacheus:entry-data (cache-name entry)
+  "Retrieve the data payload from a cache ENTRY struct for CACHE-NAME.
 
 Arguments:
-  CACHE-NAME (symbol): The name of the cache the entry belongs to.
-  ENTRY (struct): The cache entry struct itself.
+- `CACHE-NAME` (symbol): The name of the cache the entry belongs to.
+- `ENTRY`: The cache entry struct object.
 
 Returns:
-  The raw data stored in the cache entry."
+  (any) The original data stored in the cache entry."
   (funcall (cacheus-symbols-data-accessor-for-entries
             (cacheus--get-cache-symbols cache-name))
            entry))
 
 ;;;###autoload
-(defun cacheus-entry-timestamp (cache-name entry)
-  "Retrieve timestamp from a cache ENTRY struct for CACHE-NAME.
+(defun cacheus:entry-timestamp (cache-name entry)
+  "Retrieve the timestamp from a cache ENTRY struct for CACHE-NAME.
 
 Arguments:
-  CACHE-NAME (symbol): The name of the cache the entry belongs to.
-  ENTRY (struct): The cache entry struct itself.
+- `CACHE-NAME` (symbol): The name of the cache the entry belongs to.
+- `ENTRY`: The cache entry struct object.
 
 Returns:
-  A `ts` struct representing the entry's timestamp."
+  (float) The timestamp (from `float-time`) when the entry was created."
   (funcall (cacheus-symbols-ts-accessor-for-entries
             (cacheus--get-cache-symbols cache-name))
            entry))
 
 ;;;###autoload
-(defun cacheus-entry-version (cache-name entry)
-  "Retrieve version from a cache ENTRY struct for CACHE-NAME.
+(defun cacheus:entry-version (cache-name entry)
+  "Retrieve the version from a cache ENTRY struct for CACHE-NAME.
 
 Arguments:
-  CACHE-NAME (symbol): The name of the cache the entry belongs to.
-  ENTRY (struct): The cache entry struct itself.
+- `CACHE-NAME` (symbol): The name of the cache the entry belongs to.
+- `ENTRY`: The cache entry struct object.
 
 Returns:
-  The version string or number associated with the entry."
+  (any) The version string or number associated with the entry."
   (funcall (cacheus-symbols-entry-ver-accessor-for-entries
             (cacheus--get-cache-symbols cache-name))
            entry))
 
 ;;;###autoload
-(defun cacheus-entry-field (cache-name entry field)
+(defun cacheus:entry-field (cache-name entry field)
   "Retrieve a custom FIELD value from a cache ENTRY struct.
+This is used for caches defined with the `:fields` option.
 
 Arguments:
-  CACHE-NAME (symbol): The name of the cache the entry belongs to.
-  ENTRY (struct): The cache entry struct itself.
-  FIELD (symbol): The name of the custom field to access.
+- `CACHE-NAME` (symbol): The name of the cache the entry belongs to.
+- `ENTRY`: The cache entry struct object.
+- `FIELD` (symbol): The name of the custom field to access.
 
 Returns:
-  The value of the custom field."
+  (any) The value of the custom field."
   (let* ((syms (cacheus--get-cache-symbols cache-name))
          (s-name (cacheus-symbols-struct-name-for-entries syms))
-         (acc (intern (format "%s-%s" (symbol-name s-name) (symbol-name field)))))
+         (acc (intern (format "%s-%s" s-name field))))
     (unless (fboundp acc)
-      (error "Field '%s' not found for cache '%s'." field cache-name))
+      (error "Field '%s' not found for cache '%s'" field cache-name))
     (funcall acc entry)))
 
 ;;;###autoload
 (defun cacheus-get-underlying-cache-ht (cache-name)
   "Return the underlying hash table for a cache.
-
-For advanced introspection. Use with caution, do not modify directly.
+This function is intended for advanced introspection and debugging.
+Modifying the returned hash table directly can corrupt the cache state.
 
 Arguments:
-  CACHE-NAME (symbol): The name of the cache.
+- `CACHE-NAME` (symbol): The name of the cache.
 
 Returns:
   (hash-table) The raw hash table storing the cache entries."
@@ -638,21 +622,24 @@ Returns:
     (and rtd (cacheus-runtime-data-cache-ht rtd))))
 
 ;;;###autoload
-(defun cacheus-map (cache-name fn)
+(defun cacheus:map (cache-name fn)
   "Apply FN to each key and entry struct in CACHE-NAME.
+FN will be called with two arguments: the key and the entry struct.
 
 Arguments:
-  CACHE-NAME (symbol): The name of the cache to iterate over.
-  FN (function): A function of two arguments: (KEY, ENTRY-STRUCT)."
-  (when-let ((ht (cacheus-get-underlying-cache-ht cache-name)))
-    (maphash fn ht)))
+- `CACHE-NAME` (symbol): The name of the cache to iterate over.
+- `FN` (function): A function of two arguments `(lambda (key entry) ...)`
+
+Returns:
+  None."
+  (when-let ((ht (cacheus-get-underlying-cache-ht cache-name))) (maphash fn ht)))
 
 ;;;###autoload
-(defun cacheus-keys (cache-name)
+(defun cacheus:keys (cache-name)
   "Return a list of all keys in CACHE-NAME.
 
 Arguments:
-  CACHE-NAME (symbol): The name of the cache.
+- `CACHE-NAME` (symbol): The name of the cache.
 
 Returns:
   (list) A list of all keys currently in the cache."
@@ -660,26 +647,26 @@ Returns:
     (hash-table-keys ht)))
 
 ;;;###autoload
-(defun cacheus-values (cache-name)
+(defun cacheus:values (cache-name)
   "Return a list of all raw entry structs in CACHE-NAME.
 
 Arguments:
-  CACHE-NAME (symbol): The name of the cache.
+- `CACHE-NAME` (symbol): The name of the cache.
 
 Returns:
-  (list) A list of all entry structs currently in the cache."
+  (list) A list of all `cacheus-entry` structs in the cache."
   (when-let ((ht (cacheus-get-underlying-cache-ht cache-name)))
     (hash-table-values ht)))
 
 ;;;###autoload
-(defun cacheus-size (cache-name)
+(defun cacheus:size (cache-name)
   "Return the number of entries in CACHE-NAME.
 
 Arguments:
-  CACHE-NAME (symbol): The name of the cache.
+- `CACHE-NAME` (symbol): The name of the cache.
 
 Returns:
-  (integer) The number of items in the cache."
+  (integer) The number of items currently in the cache."
   (when-let ((ht (cacheus-get-underlying-cache-ht cache-name)))
     (hash-table-count ht)))
 
@@ -690,9 +677,9 @@ Returns:
   "Hook to save all file-backed caches on Emacs shutdown."
   (when cacheus-save-all-on-shutdown
     (let ((logger (cacheus-resolve-logger nil)))
-      (condition-case-unless-debug err (cacheus-save-all-caches)
+      (condition-case e (cacheus:save-all-caches)
         (error (funcall logger :error "Cacheus: Error during shutdown save: %S"
-                        err :trace))))))
+                          e))))))
 
 (add-hook 'kill-emacs-hook #'cacheus--run-save-all-caches-on-shutdown)
 
